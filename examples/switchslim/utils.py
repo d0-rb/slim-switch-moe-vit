@@ -18,6 +18,29 @@ import torch
 import torch.distributed as dist
 
 
+# https://gitlab.com/prakhark2/relevance-mapping-networks/-/blob/master/code/dataload.py
+def get_split_cifar100(opt, task_id, class_size=5, shuffle=False):
+    start_class = (task_id-1)*class_size
+    end_class = task_id*class_size
+
+    if opt.dataset == 's-cifar100':
+        opt.dataset='cifar100'
+    train, test = data_create(opt)
+    targets_train = torch.tensor(train.targets)
+    target_train_idx = ((targets_train >= start_class) & (targets_train < end_class))
+
+    targets_test = torch.tensor(test.targets)
+    target_test_idx = ((targets_test >= start_class) & (targets_test < end_class))
+
+    trainloader = torch.utils.data.DataLoader(torch.utils.data.dataset.Subset(train, np.where(target_train_idx==1)[0]),\
+         batch_size=opt.batch_size, shuffle=True, num_workers=int(opt.workers), drop_last=True)  # check this
+    testloader = torch.utils.data.DataLoader(torch.utils.data.dataset.Subset(test, np.where(target_test_idx==1)[0]),\
+         batch_size=opt.batch_size, shuffle=False, num_workers=int(opt.workers), drop_last=True)  # check this
+    if opt.dataset == 'cifar100':
+        opt.dataset='s-cifar100'
+    return trainloader, testloader
+
+
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
     window or the global series average.
