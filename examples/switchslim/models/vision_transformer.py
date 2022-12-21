@@ -277,22 +277,37 @@ class SwitchableVisionTransformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        # self.router = SwitchableLayerNorm(embed_dim, switchable_buckets=buckets)
+        self.router = SwitchableLayerNorm(embed_dim, switchable_buckets=buckets)
         self.router_start = 0
         self.router_end = -1
         self.routing = False
         self.collect_embeddings = collect_embeddings
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        self.blocks = [
+        # self.blocks = [
+        #     Block(
+        #         dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+        #         attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, num_tokens=num_patches + self.num_tokens)
+        #     for i in range(depth)
+        # ]
+        self.pre_blocks = nn.Sequential(*[
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
                 attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer, num_tokens=num_patches + self.num_tokens)
-            for i in range(depth)
-        ]
-        self.pre_blocks = nn.Sequential(*self.blocks[:self.router_start])
-        self.mid_blocks = nn.Sequential(*self.blocks[self.router_start:self.router_end])
-        self.post_blocks = nn.Sequential(*self.blocks[self.router_end:])
+            for i in range(self.router_start % depth)
+        ])
+        self.mid_blocks = nn.Sequential(*[
+            Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                attn_drop=attn_drop_rate, drop_path=dpr[i + (self.router_start % depth)], norm_layer=norm_layer, act_layer=act_layer, num_tokens=num_patches + self.num_tokens)
+            for i in range((self.router_end - self.router_start) % depth)
+        ])
+        self.post_blocks = nn.Sequential(*[
+            Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                attn_drop=attn_drop_rate, drop_path=dpr[i + (self.router_end % depth)], norm_layer=norm_layer, act_layer=act_layer, num_tokens=num_patches + self.num_tokens)
+            for i in range((depth - self.router_end) % depth)
+        ])
         print(len(self.pre_blocks), len(self.mid_blocks), len(self.post_blocks))
         # self.blocks = nn.Sequential(*self.blocks)
         self.norm = norm_layer(embed_dim)
@@ -373,47 +388,49 @@ class SwitchableVisionTransformer(nn.Module):
         else:
             x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = self.pos_drop(x + self.pos_embed)
-        x = self.pre_blocks(x)
 
         return x
 
     def forward_features(self, x, bucket: Tensor | int | None = None, threshold: int = 0):
         x = self.forward_pre(x)
-        x = self.mid_blocks(x)
-        x = self.post_blocks(x)
-        # pre_x, bucket = self.router(x, bucket)  # bucket is (*) or unnormalized dims
-        # if self.routing:
-        #     # rearrange tensor so that passthru tokens are first and then truncated
-        #     passthru_mask = bucket >= threshold
-        #     first_n_seq = passthru_mask.sum(dim=-1)
-        #     max_passthru_len = first_n_seq.amax(dim=-1)
-        #     index_x = torch.arange(self.router.switchable_buckets).unsqueeze(0).broadcast_to(passthru_mask.shape)
-        #     first_n_mask = index_x < passthru_mask
-        #     rearranged_x = torch.zeros_like(x)
-        #     rearranged_x[first_n_mask] = x[passthru_mask]
-        #     shortened_x = rearranged_x[:, max_passthru_len]
+        x = self.pre_blocks(x)
+        
+        if self.collect_embeddings:
+            pre_x = x
+        else:
+            pre_x = None
 
-        #     shortened_x = self.mid_blocks(shortened_x)
+        x, bucket = self.router(x, bucket)  # bucket is (*) or unnormalized dims
+        if self.routing:
+            # rearrange tensor so that passthru tokens are first and then truncated
+            passthru_mask = bucket >= threshold
+            first_n_seq = passthru_mask.sum(dim=-1)
+            max_passthru_len = first_n_seq.amax(dim=-1)
+            index_x = torch.arange(self.router.switchable_buckets).unsqueeze(0).broadcast_to(passthru_mask.shape)
+            first_n_mask = index_x < passthru_mask
+            rearranged_x = torch.zeros_like(x)
+            rearranged_x[first_n_mask] = x[passthru_mask]
+            shortened_x = rearranged_x[:, max_passthru_len]
 
-        #     # rearrange shortened tensor back to original indices and mask back in skip tokens
-        #     full_x = torch.empty_like(x)
-        #     full_x[passthru_mask] = shortened_x[first_n_mask]
-        #     full_x[passthru_mask == False] = pre_x[passthru_mask == False]
-        #     x = self.post_blocks(full_x)
-        # else:
-        #     x = self.mid_blocks(x)
-        #     x = self.post_blocks(x)
+            shortened_x = self.mid_blocks(shortened_x)
+
+            # rearrange shortened tensor back to original indices and mask back in skip tokens
+            full_x = torch.empty_like(x)
+            full_x[passthru_mask] = shortened_x[first_n_mask]
+            full_x[passthru_mask == False] = pre_x[passthru_mask == False]
+            x = self.post_blocks(full_x)
+        else:
+            x = self.mid_blocks(x)
+            x = self.post_blocks(x)
+        
         x = self.norm(x)
         if self.dist_token is None:
-            return self.pre_logits(x[:, 0])
+            return self.pre_logits(x[:, 0]), pre_x
         else:
-            return x[:, 0], x[:, 1]
+            return (x[:, 0], x[:, 1]), pre_x
 
     def forward(self, x, bucket: int | None = None, threshold: int | None = None):
-        if self.collect_embeddings:
-            pre_x = self.forward_pre(x)
-            x = pre_x
-        x = self.forward_features(x, bucket, threshold)
+        x, embeddings = self.forward_features(x, bucket, threshold)
         if self.head_dist is not None:
             x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
             if self.training and not torch.jit.is_scripting():
@@ -425,7 +442,7 @@ class SwitchableVisionTransformer(nn.Module):
             x = self.head(x)
         
         if self.collect_embeddings:
-            return x, pre_x
+            return x, embeddings
         else:
             return x
 
@@ -443,7 +460,7 @@ class VisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None, distilled=False,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., embed_layer=PatchEmbed, norm_layer=None,
-                 act_layer=None, weight_init=''):
+                 act_layer=None, weight_init='', **kwargs):
         """
         Args:
             img_size (int, tuple): input image size

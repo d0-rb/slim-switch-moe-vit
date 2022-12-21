@@ -188,7 +188,7 @@ def get_args_parser():
 
     # token skipping parameters
     parser.add_argument('--threshold', default=0, help='manually selected bucket threshold')
-    parser.add_argument('--collect', default=False, help='whether or not to collect pre-switch embeddings')
+    parser.add_argument('--collect', action='store_true', default=False, help='whether or not to collect pre-switch embeddings')
 
     return parser
 
