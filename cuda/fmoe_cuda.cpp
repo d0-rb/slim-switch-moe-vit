@@ -5,7 +5,7 @@
 
 // global_exchange
 #ifdef FMOE_USE_NCCL
-#include <c10d/ProcessGroupNCCL.hpp>
+#include </home/henry/anaconda3/envs/moeswitchslim/lib/python3.10/site-packages/torch/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 torch::Tensor _expert_exchange(
         torch::Tensor local_expert_count,
         long n_expert, long n_workers);

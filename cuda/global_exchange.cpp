@@ -98,7 +98,7 @@ torch::Tensor _global_gather(
     return local_output_buf;
 }
 
-#include <c10d/ProcessGroupNCCL.hpp>
+#include </home/henry/anaconda3/envs/moeswitchslim/lib/python3.10/site-packages/torch/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 
 class HackNCCLGroup: public c10d::ProcessGroupNCCL {
 public:

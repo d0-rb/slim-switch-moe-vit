@@ -8,13 +8,131 @@ import json
 import pickle
 from typing import Any, Callable, cast, Dict, List, Optional, Tuple
 
+import numpy as np
+
+import torch
 from torchvision import datasets, transforms
 from torchvision.datasets.folder import ImageFolder, default_loader
 
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import create_transform
 
+
 IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', '.webp')
+
+
+def data_create(opt):
+
+    if opt.data_set == 'mnist' or 'pmnist':
+        dataset = datasets.MNIST(root=opt.data_path, download=True, train=True,
+                                    transform=transforms.Compose([
+                                        transforms.Resize(opt.input_size),
+                                        transforms.RandomApply([transforms.RandomAffine(degrees=(-10, 10), \
+                                            scale=(0.8, 1.2), translate=(0.05, 0.05))],p=0.5),
+                                        transforms.ToTensor(),
+                                        transforms.Normalize((0.1307,), (0.3081,)),
+                                    ]))
+        valset = datasets.MNIST(root=opt.data_path, download=True, train=False,
+                                   transform=transforms.Compose([
+                                       transforms.Resize(opt.input_size),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize((0.1307,), (0.3081,)),
+                                   ]))
+        nb_classes = 10
+
+    if opt.data_set == 'fmnist':
+        dataset = datasets.FashionMNIST(root=opt.data_path, download=True, train=True,
+                                    transform=transforms.Compose([
+                                        transforms.Resize(opt.input_size),
+                                        transforms.ToTensor(),
+                                        transforms.Normalize((0.1307,), (0.3081,)),
+                                    ]))
+        valset = datasets.FashionMNIST(root=opt.data_path, download=True, train=False,
+                                   transform=transforms.Compose([
+                                       transforms.Resize(opt.input_size),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize((0.1307,), (0.3081,)),
+                                   ]))
+        nb_classes = 10
+
+    if opt.data_set == 'svhn':
+        dataset = datasets.SVHN(root=opt.data_path, download=True, split='train',
+                            transform=transforms.Compose([transforms.Resize(opt.input_size), transforms.ToTensor(),
+                                                          transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]))
+        valset = datasets.SVHN(root=opt.data_path, download=True, split='test',
+                           transform=transforms.Compose([transforms.Resize(opt.input_size), transforms.ToTensor(),
+                                                         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]))
+        nb_classes = 10
+
+    elif opt.data_set in ['imagenet', 'folder', 'lfw']:
+        # folder dataset
+        dataset = datasets.ImageFolder(root=opt.data_path,
+                                   transform=transforms.Compose([
+                                       transforms.Resize(opt.input_size),
+                                       transforms.CenterCrop(opt.input_size),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                                   ]))
+        nb_classes = 1000
+
+    elif opt.data_set == 'lsun':
+        dataset = datasets.LSUN(db_path=opt.data_path, classes=['bedroom_train'],
+                            transform=transforms.Compose([
+                                transforms.Resize(opt.input_size),
+                                transforms.CenterCrop(opt.input_size),
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+        nb_classes = 30
+
+    elif opt.data_set == 'cifar10':
+        dataset = datasets.CIFAR10(root=opt.data_path, download=True,
+                               transform=transforms.Compose([
+                               transforms.RandomCrop(32, padding=4),
+                               transforms.RandomHorizontalFlip(),
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                                # transforms.Lambda(lambda x: add_noise(x))
+                                ]))
+        valset = datasets.CIFAR10(root=opt.data_path, download=True, train=False,
+                              transform=transforms.Compose([
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                                # transforms.Lambda(lambda x: add_noise(x))
+                                ]))
+        nb_classes = 10
+
+    elif opt.data_set == 'cifar100' or opt.data_set == 'cifar':
+        dataset = datasets.CIFAR100(root=opt.data_path, download=False,
+                                transform=transforms.Compose([
+                                  transforms.RandomCrop(32, padding=4),
+                                  transforms.RandomHorizontalFlip(),
+                                  transforms.ToTensor(),
+                                  transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                                  # transforms.Lambda(lambda x: add_noise(x))
+                                ]))
+        valset = datasets.CIFAR100(root=opt.data_path, download=False, train=False,
+                               transform=transforms.Compose([
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                                # transforms.Lambda(lambda x: add_noise(x))
+                                ]))
+        nb_classes = 100
+
+    return dataset, valset, nb_classes
+
+
+# https://gitlab.com/prakhark2/relevance-mapping-networks/-/blob/master/code/dataload.py
+def build_split_dataset(is_train, opt, start_class, class_size=5):
+    end_class = start_class + class_size
+
+    dataset, nb_classes = build_dataset(is_train, opt)
+    targets = torch.tensor(dataset.targets)
+    target_idx = ((targets >= start_class) & (targets < end_class))
+
+    subset = torch.utils.data.dataset.Subset(dataset, np.where(target_idx==1)[0])
+
+    return subset, nb_classes
 
 
 class INatDataset(ImageFolder):
