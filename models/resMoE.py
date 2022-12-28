@@ -133,3 +133,25 @@ def resmoe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
             bound_method = forward_residule_moe.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
     return model
+
+
+@register_model
+def moe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.mlp = CustomizedMoEMLP(
+                embed_dim,
+                embed_dim * mlp_ratio,
+                moe_num_experts=8,
+                moe_top_k=2,
+                drop=drop_rate,
+            )
+    return model

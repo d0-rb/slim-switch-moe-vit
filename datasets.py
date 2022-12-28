@@ -1,25 +1,50 @@
 # This code is based on DeiT:
 # https://github.com/facebookresearch/deit
-
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
-import os
 import json
+import os
 import pickle
-from typing import Any, Callable, cast, Dict, List, Optional, Tuple
+from typing import Any
+from typing import Callable
+from typing import cast
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
 
-from torchvision import datasets, transforms
-from torchvision.datasets.folder import ImageFolder, default_loader
-
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import create_transform
+from timm.data.constants import IMAGENET_DEFAULT_MEAN
+from timm.data.constants import IMAGENET_DEFAULT_STD
+from torchvision import datasets
+from torchvision import transforms
+from torchvision.datasets.folder import default_loader
+from torchvision.datasets.folder import ImageFolder
 
-IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm', '.tif', '.tiff', '.webp')
+IMG_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".ppm",
+    ".bmp",
+    ".pgm",
+    ".tif",
+    ".tiff",
+    ".webp",
+)
 
 
 class INatDataset(ImageFolder):
-    def __init__(self, root, train=True, year=2018, transform=None, target_transform=None,
-                 category='name', loader=default_loader):
+    def __init__(
+        self,
+        root,
+        train=True,
+        year=2018,
+        transform=None,
+        target_transform=None,
+        category="name",
+        loader=default_loader,
+    ):
         self.transform = transform
         self.loader = loader
         self.target_transform = target_transform
@@ -29,7 +54,7 @@ class INatDataset(ImageFolder):
         with open(path_json) as json_file:
             data = json.load(json_file)
 
-        with open(os.path.join(root, 'categories.json')) as json_file:
+        with open(os.path.join(root, "categories.json")) as json_file:
             data_catg = json.load(json_file)
 
         path_json_for_targeter = os.path.join(root, f"train{year}.json")
@@ -39,17 +64,17 @@ class INatDataset(ImageFolder):
 
         targeter = {}
         indexer = 0
-        for elem in data_for_targeter['annotations']:
+        for elem in data_for_targeter["annotations"]:
             king = []
-            king.append(data_catg[int(elem['category_id'])][category])
+            king.append(data_catg[int(elem["category_id"])][category])
             if king[0] not in targeter.keys():
                 targeter[king[0]] = indexer
                 indexer += 1
         self.nb_classes = len(targeter)
 
         self.samples = []
-        for elem in data['images']:
-            cut = elem['file_name'].split('/')
+        for elem in data["images"]:
+            cut = elem["file_name"].split("/")
             target_current = int(cut[2])
             path_current = os.path.join(root, cut[0], cut[2], cut[3])
 
@@ -58,9 +83,9 @@ class INatDataset(ImageFolder):
             self.samples.append((path_current, target_current_true))
 
     # __getitem__ and __len__ inherited from ImageFolder
-    
+
+
 class IMAGENET100(ImageFolder):
-        
     def _find_classes(self, dir: str) -> Tuple[List[str], Dict[str, int]]:
         """
         Finds the class folders in a dataset.
@@ -74,14 +99,14 @@ class IMAGENET100(ImageFolder):
         Ensures:
             No class is a subdirectory of another.
         """
-        if os.path.exists('imnet100'):
-            f = open('imnet100/train_classes.pkl','rb')
+        if os.path.exists("imnet100"):
+            f = open("imnet100/train_classes.pkl", "rb")
             classes = pickle.load(f)
             f.close()
-            f = open('imnet100/train_class_to_idx.pkl','rb')
+            f = open("imnet100/train_class_to_idx.pkl", "rb")
             class_to_idx = pickle.load(f)
             f.close()
-            print('Loaded classes')
+            print("Loaded classes")
             return classes, class_to_idx
         classes = [d.name for d in os.scandir(dir) if d.is_dir()][:100]
         classes.sort()
@@ -92,34 +117,48 @@ class IMAGENET100(ImageFolder):
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
-    if args.data_set == 'CIFAR100':
-        dataset = datasets.CIFAR100(args.data_path, train=is_train, transform=transform)
+    if args.data_set == "CIFAR100":
+        dataset = datasets.CIFAR100(
+            args.data_path, train=is_train, transform=transform, download=True
+        )
         nb_classes = 100
-    elif args.data_set == 'CIFAR10':
-        dataset = datasets.CIFAR10(args.data_path, train=is_train, transform=transform)
+    elif args.data_set == "CIFAR10":
+        dataset = datasets.CIFAR10(
+            args.data_path, train=is_train, transform=transform, download=True
+        )
         nb_classes = 10
-    elif args.data_set == 'CAR':
-        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+    elif args.data_set == "CAR":
+        root = os.path.join(args.data_path, "train" if is_train else "val")
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 196
-    elif args.data_set == 'FLOWER':
-        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+    elif args.data_set == "FLOWER":
+        root = os.path.join(args.data_path, "train" if is_train else "val")
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 102
-    elif args.data_set == 'IMNET':
-        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+    elif args.data_set == "IMNET":
+        root = os.path.join(args.data_path, "train" if is_train else "val")
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
-    elif args.data_set == 'INAT':
-        dataset = INatDataset(args.data_path, train=is_train, year=2018,
-                              category=args.inat_category, transform=transform)
+    elif args.data_set == "INAT":
+        dataset = INatDataset(
+            args.data_path,
+            train=is_train,
+            year=2018,
+            category=args.inat_category,
+            transform=transform,
+        )
         nb_classes = dataset.nb_classes
-    elif args.data_set == 'INAT19':
-        dataset = INatDataset(args.data_path, train=is_train, year=2019,
-                              category=args.inat_category, transform=transform)
+    elif args.data_set == "INAT19":
+        dataset = INatDataset(
+            args.data_path,
+            train=is_train,
+            year=2019,
+            category=args.inat_category,
+            transform=transform,
+        )
         nb_classes = dataset.nb_classes
-    elif args.data_set == 'IMNET100':
-        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+    elif args.data_set == "IMNET100":
+        root = os.path.join(args.data_path, "train" if is_train else "val")
         dataset = IMAGENET100(root, transform=transform)
         nb_classes = 100
 
@@ -143,15 +182,16 @@ def build_transform(is_train, args):
         if not resize_im:
             # replace RandomResizedCropAndInterpolation with
             # RandomCrop
-            transform.transforms[0] = transforms.RandomCrop(
-                args.input_size, padding=4)
+            transform.transforms[0] = transforms.RandomCrop(args.input_size, padding=4)
         return transform
 
     t = []
     if resize_im:
         size = int((256 / 224) * args.input_size)
         t.append(
-            transforms.Resize(size, interpolation=3),  # to maintain same ratio w.r.t. 224 images
+            transforms.Resize(
+                size, interpolation=3
+            ),  # to maintain same ratio w.r.t. 224 images
         )
         t.append(transforms.CenterCrop(args.input_size))
 
