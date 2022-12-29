@@ -68,7 +68,7 @@ T* _d2h(const T* dptr, size_t sz) {
 
 #ifdef FMOE_USE_NCCL
 
-#include <nccl.h>
+#include </usr/local/nccl_2.16.2-1+cuda11.0_x86_64/include/nccl.h>
 
 #define UPDATE_COUNTERS(__count__) { \
     if (i == rank) { \

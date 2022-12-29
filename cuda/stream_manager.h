@@ -4,7 +4,7 @@
 #include "utils/helper_cuda.h"
 
 #ifdef FMOE_USE_NCCL
-#include <nccl.h>
+#include </usr/local/nccl_2.16.2-1+cuda11.0_x86_64/include/nccl.h>
 
 #define NCCL_SAFE_CALL(__fn__) { \
     auto __res__ = __fn__; \
