@@ -1,4 +1,3 @@
-import math
 import typing as typ
 
 import torch as th
@@ -102,18 +101,18 @@ class ResBlock(Block):
 
 
 def forward_residule_moe(self, x):
+    x = self.norm1(x)
     # x.shape (B x Tokens x dim)
 
     mask = self.dense_gate(x)
-    x = self.norm1(x)
 
     skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
     tk = x * mask[:, :, 1].unsqueeze(dim=-1)
 
     x = self.drop_path(self.attn(tk)) + tk + skip_tk
+    x = self.norm2(x)
 
     mask = self.moe_gate(x)
-    x = self.norm2(x)
 
     skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
     tk = x * mask[:, :, 1].unsqueeze(dim=-1)
