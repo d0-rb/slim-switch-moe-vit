@@ -48,6 +48,7 @@ class Gate(nn.Module):
 
     def step(self, delta: th.Tensor):
         thresh = self._threshold - delta
+        print(thresh)
         self._threshold.data.copy_(
             max(thresh, self.threshold)  # type: ignore[call-overload]
         )  # type: ignore[operator]
@@ -141,7 +142,7 @@ from .model import deit_tiny_patch16_224
 
 
 @register_model
-def resmoe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
+def resmoe_tiny_patch16_224_expert8(pretrained=False, starting_threshold=1.0, target_threshold=0.9, **kwargs):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
     embed_dim = 192
@@ -152,8 +153,8 @@ def resmoe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
 
     for name, module in model.named_modules():
         if isinstance(module, Block):
-            module.dense_gate = Gate(embed_dim, 1.0)
-            module.moe_gate = Gate(embed_dim, 1.0)
+            module.dense_gate = Gate(embed_dim, 1.0, starting_threshold=starting_threshold, target_threshold=target_threshold)
+            module.moe_gate = Gate(embed_dim, 1.0, starting_threshold=starting_threshold, target_threshold=target_threshold)
 
             module.mlp = CustomizedMoEMLP(
                 embed_dim,

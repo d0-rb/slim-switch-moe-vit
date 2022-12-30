@@ -39,9 +39,6 @@ def train_one_epoch(
     header = "Epoch: [{}]".format(epoch)
     print_freq = 10
 
-    if args.collect:
-        embeddings = None
-
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -54,8 +51,6 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast():
             outputs = model(samples)
-            if args.collect:
-                outputs, embeddings = outputs
             loss = criterion(samples, outputs, targets)
 
         loss_value = loss.item()

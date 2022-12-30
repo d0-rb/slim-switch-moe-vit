@@ -402,13 +402,10 @@ def get_args_parser():
 
     # token skipping parameters
     parser.add_argument(
-        "--threshold", default=0, help="manually selected bucket threshold"
+        "--starting-threshold", default=1.0, type=float, help="starting token skip threshold (for both attn and moe gates)"
     )
     parser.add_argument(
-        "--collect",
-        action="store_true",
-        default=False,
-        help="whether or not to collect pre-switch embeddings",
+        "--target-threshold", default=0.9, type=float, help="target token skip threshold (for both attn and moe gates)"
     )
 
     return parser
@@ -507,7 +504,8 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         img_size=args.input_size,
-        collect_embeddings=args.collect,
+        starting_threshold=args.starting_threshold,
+        target_threshold=args.target_threshold,
     )
 
     if args.finetune:
