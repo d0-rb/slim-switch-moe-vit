@@ -1,3 +1,4 @@
+import math
 import typing as typ
 
 import torch as th
@@ -34,32 +35,43 @@ class Gate(nn.Module):
         in_dim: int,
         tau: float,
         dropout: float = 0.0,
-        ratio: int = 10,
+        target_threshold: float = 0.9,
+        starting_threshold: float = 1.0,
     ):
         super().__init__()
-        out_dim = ratio
-        self.head = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_dim, out_dim))
+        self.head = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_dim, 1))
         self.tau = tau
+        self.register_buffer("_threshold", th.tensor(starting_threshold))
+        self.register_buffer("threshold", th.tensor(target_threshold))
 
         self._total_tokens = 0
         self._skipped_tokens = 0
 
+    def step(self, delta: th.Tensor):
+        thresh = self._threshold - delta
+        self._threshold.data.copy_(
+            max(thresh, self.threshold)  # type: ignore[call-overload]
+        )  # type: ignore[operator]
+
     def forward(self, x):
         # x.shape (B x Tokens x dim)
-        out = self.head(x)  # (B x Token x 2)
-        # out is a category choice (either skip or don't), we use gumbel_softmax to relax it
-        if self.training:
-            choice = nn.functional.gumbel_softmax(out, self.tau, hard=True, dim=-1)
-        else:
-            index = out.topk(1, dim=-1)[-1]
-            choice = th.scatter(th.zeros_like(out), dim=-1, index=index, value=1.0)
-            # (B X token X ratio)
+        B, T, D = x.shape
+        out = self.head(x)  # (B x Token x 1)
+
+        ret = th.empty((B, T, 2)).to(x.device)
+        threshold = self._threshold if self.training else self.threshold
+        prob = th.sigmoid(out)
+        _prob = 1 - prob
+
+        skip_tk = (prob > threshold).float() + _prob.detach() - _prob
+        tk = (prob <= threshold).float() + prob.detach() - prob
+        ret = th.cat([skip_tk, tk], dim=-1)
+        # (B X token X 2)
 
         self._total_tokens += math.prod(out.shape[0:2])
-        self._skipped_tokens += choice[:, :, 0].sum().detach().item()
+        self._skipped_tokens += skip_tk.sum().detach().item()
 
-        choice[:, :, 1] = choice[:, :, 1::].sum(dim=-1)
-        return choice[:, :, 0:2]
+        return ret
 
 
 class ResBlock(Block):
@@ -137,8 +149,8 @@ def resmoe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
 
     for name, module in model.named_modules():
         if isinstance(module, Block):
-            module.dense_gate = Gate(embed_dim, 1.0, ratio=10)
-            module.moe_gate = Gate(embed_dim, 1.0, ratio=10)
+            module.dense_gate = Gate(embed_dim, 1.0)
+            module.moe_gate = Gate(embed_dim, 1.0)
 
             module.mlp = CustomizedMoEMLP(
                 embed_dim,

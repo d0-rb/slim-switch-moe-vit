@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch as th
 import torch.backends.cudnn as cudnn
 from timm.data import Mixup
 from timm.loss import LabelSmoothingCrossEntropy
@@ -29,6 +30,7 @@ from datasets import build_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
+from models.resMoE import Gate
 from samplers import RASampler
 
 # import models_v2
@@ -678,6 +680,14 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
+
+    delta: th.Tensor = 0.0
+    for _, module in model.named_modules():
+        if isinstance(module, (Gate)):
+            delta = (module._threshold - module.threshold) / (
+                args.epochs - args.start_epoch
+            )
+            break
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
@@ -698,6 +708,10 @@ def main(args):
         )
 
         lr_scheduler.step(epoch)
+        for _, module in model.named_modules():
+            if isinstance(module, (Gate)):
+                module.step(delta)
+
         if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]
             for checkpoint_path in checkpoint_paths:
