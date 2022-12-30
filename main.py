@@ -13,15 +13,16 @@ import numpy as np
 import torch
 import torch as th
 import torch.backends.cudnn as cudnn
-from timm.data import Mixup
-from timm.loss import LabelSmoothingCrossEntropy
-from timm.loss import SoftTargetCrossEntropy
-from timm.models import create_model
-from timm.optim import create_optimizer
-from timm.scheduler import create_scheduler
-from timm.utils import get_state_dict
-from timm.utils import ModelEma
-from timm.utils import NativeScaler
+from timm.data import Mixup  # type: ignore[import]
+from timm.loss import LabelSmoothingCrossEntropy  # type: ignore[import]
+from timm.loss import SoftTargetCrossEntropy  # type: ignore[import]
+from timm.models import create_model  # type: ignore[import]
+from timm.optim import create_optimizer_v2 as create_optimizer  # type: ignore[import]
+from timm.optim import optimizer_kwargs
+from timm.scheduler import create_scheduler  # type: ignore[import]
+from timm.utils import get_state_dict  # type: ignore[import]
+from timm.utils import ModelEma  # type: ignore[import]
+from timm.utils import NativeScaler  # type: ignore[import]
 from torch.utils.tensorboard import SummaryWriter
 
 import models
@@ -416,6 +417,13 @@ def get_args_parser():
         help="target token skip threshold (for both attn and moe gates)",
     )
 
+    parser.add_argument(
+        "--gate-lr",
+        default=1e-5,
+        type=float,
+        help="set learning for skip gates apart from the rest of our model",
+    )
+
     return parser
 
 
@@ -602,7 +610,25 @@ def main(args):
     if not args.unscale_lr:
         linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
         args.lr = linear_scaled_lr
-    optimizer = create_optimizer(args, model_without_ddp)
+
+    def param_group_fn(model: torch.nn.Module):
+        base_params = []
+        gate_params = []
+        for name, param in model.named_parameters():
+            if "moe_gate" in name or "dense_gate" in name:
+                gate_params.append(param)
+            else:
+                base_params.append(param)
+        ret = [
+            {"params": base_params},
+            {"params": gate_params, "lr": args.gate_lr},
+        ]
+        return ret
+
+    optimizer = create_optimizer(
+        model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
+    )
+
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
