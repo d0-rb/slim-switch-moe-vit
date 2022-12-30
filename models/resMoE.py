@@ -40,7 +40,6 @@ class Gate(nn.Module):
     ):
         super().__init__()
         self.head = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_dim, 1))
-        self.tau = tau
         self.register_buffer("_threshold", th.tensor(starting_threshold))
         self.register_buffer("threshold", th.tensor(target_threshold))
 
@@ -58,13 +57,17 @@ class Gate(nn.Module):
         B, T, D = x.shape
         out = self.head(x)  # (B x Token x 1)
 
-        ret = th.empty((B, T, 2)).to(x.device)
         threshold = self._threshold if self.training else self.threshold
         prob = th.sigmoid(out)
         _prob = 1 - prob
 
-        skip_tk = (prob > threshold).float() + _prob.detach() - _prob
-        tk = (prob <= threshold).float() + prob.detach() - prob
+        if self.training:
+            skip_tk = _prob
+            tk = prob
+        else:
+            skip_tk = (prob > threshold).float() + _prob.detach() - _prob
+            tk = (prob <= threshold).float() + prob.detach() - prob
+
         ret = th.cat([skip_tk, tk], dim=-1)
         # (B X token X 2)
 
