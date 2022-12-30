@@ -1,3 +1,4 @@
+import math
 import typing as typ
 
 import torch as th
@@ -8,7 +9,7 @@ from timm.models import register_model  # type: ignore[import]
 from .model import DistilledVisionTransformer as Deit
 from .vision_transformer import Block
 
-__all__ = ["ResBlock", "resmoe_tiny_patch16_224_expert8"]
+__all__ = ["Gate", "ResBlock", "resmoe_tiny_patch16_224_expert8"]
 
 
 class CustomizedMoEMLP(FMoETransformerMLP):
@@ -29,21 +30,37 @@ class CustomizedMoEMLP(FMoETransformerMLP):
 
 
 class Gate(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, tau: float, dropout: float = 0.0):
+    def __init__(
+        self,
+        in_dim: int,
+        tau: float,
+        dropout: float = 0.0,
+        ratio: int = 10,
+    ):
         super().__init__()
+        out_dim = ratio
         self.head = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_dim, out_dim))
         self.tau = tau
+
+        self._total_tokens = 0
+        self._skipped_tokens = 0
 
     def forward(self, x):
         # x.shape (B x Tokens x dim)
         out = self.head(x)  # (B x Token x 2)
         # out is a category choice (either skip or don't), we use gumbel_softmax to relax it
         if self.training:
-            return nn.functional.gumbel_softmax(out, self.tau, hard=True, dim=-1)
+            choice = nn.functional.gumbel_softmax(out, self.tau, hard=True, dim=-1)
         else:
             index = out.topk(1, dim=-1)[-1]
-            out = th.scatter(th.zeros_like(out), dim=-1, index=index, value=1.0)
-            return out
+            choice = th.scatter(th.zeros_like(out), dim=-1, index=index, value=1.0)
+            # (B X token X ratio)
+
+        self._total_tokens += math.prod(out.shape[0:2])
+        self._skipped_tokens += choice[:, :, 0].sum().detach().item()
+
+        choice[:, :, 1] = choice[:, :, 1::].sum(dim=-1)
+        return choice[:, :, 0:2]
 
 
 class ResBlock(Block):
@@ -59,8 +76,8 @@ class ResBlock(Block):
             kwargs["drop_rate"],
         )
 
-        self.dense_gate = Gate(args[0], 2, 1, 0.5)
-        self.moe_gate = Gate(args[0], 2, 1, 0.5)
+        self.dense_gate = Gate(args[0], 1, 0.0, 10)
+        self.moe_gate = Gate(args[0], 1, 0.0, 10)
 
     def forward(self, x):
         x = self.norm1(x)
@@ -85,18 +102,18 @@ class ResBlock(Block):
 
 
 def forward_residule_moe(self, x):
-    x = self.norm1(x)
     # x.shape (B x Tokens x dim)
 
     mask = self.dense_gate(x)
+    x = self.norm1(x)
 
     skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
     tk = x * mask[:, :, 1].unsqueeze(dim=-1)
 
     x = self.drop_path(self.attn(tk)) + tk + skip_tk
-    x = self.norm2(x)
 
     mask = self.moe_gate(x)
+    x = self.norm2(x)
 
     skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
     tk = x * mask[:, :, 1].unsqueeze(dim=-1)
@@ -121,8 +138,8 @@ def resmoe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
 
     for name, module in model.named_modules():
         if isinstance(module, Block):
-            module.dense_gate = Gate(embed_dim, 2, 1.0)
-            module.moe_gate = Gate(embed_dim, 2, 1.0)
+            module.dense_gate = Gate(embed_dim, 1.0, ratio=10)
+            module.moe_gate = Gate(embed_dim, 1.0, ratio=10)
 
             module.mlp = CustomizedMoEMLP(
                 embed_dim,
