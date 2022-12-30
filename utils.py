@@ -14,6 +14,7 @@ import time
 from collections import defaultdict
 from collections import deque
 
+import tensorboardX
 import torch
 import torch.distributed as dist
 
@@ -293,3 +294,23 @@ def init_distributed_mode(args):
     )
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
+
+
+class TensorboardXTracker:
+    def __init__(self, log_dir):
+        self.writer = tensorboardX.SummaryWriter(log_dir)
+
+    def log_scalar(self, var_name, value, step):
+        self.writer.add_scalar(var_name, value, step)
+
+    def log_loss(self, loss, step):
+        self.log_scalar("loss", loss, step)
+
+    def log_validation_acc(self, acc, step):
+        self.log_scalar("validation_acc", acc, step)
+
+    def log_test_acc(self, acc, step):
+        self.log_scalar("test_acc", acc, step)
+
+    def close(self):
+        self.writer.close()

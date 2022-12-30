@@ -5,6 +5,7 @@
 import argparse
 import datetime
 import json
+import os
 import time
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from engine import train_one_epoch
 from losses import DistillationLoss
 from models.resMoE import Gate
 from samplers import RASampler
+from utils import TensorboardXTracker
 
 # import models_v2
 
@@ -402,10 +404,16 @@ def get_args_parser():
 
     # token skipping parameters
     parser.add_argument(
-        "--starting-threshold", default=1.0, type=float, help="starting token skip threshold (for both attn and moe gates)"
+        "--starting-threshold",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for both attn and moe gates)",
     )
     parser.add_argument(
-        "--target-threshold", default=0.9, type=float, help="target token skip threshold (for both attn and moe gates)"
+        "--target-threshold",
+        default=0.9,
+        type=float,
+        help="target token skip threshold (for both attn and moe gates)",
     )
 
     return parser
@@ -642,9 +650,12 @@ def main(args):
         args.distillation_tau,
     )
 
-    output_dir = Path(args.output_dir)
+    timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
+    output_dir = os.path.join(args.output_dir, timestr)
+    os.makedirs(output_dir, exist_ok=True)
     if args.output_dir:
-        writer = SummaryWriter(output_dir)
+        writer = TensorboardXTracker(output_dir)
+    output_dir = Path(args.output_dir)
 
     if args.resume:
         if args.resume.startswith("https"):
@@ -731,8 +742,11 @@ def main(args):
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )
 
+        writer.log_test_acc(test_stats["acc1"], epoch)
+        writer.log_loss(train_stats["loss"], epoch)
+
         if max_accuracy < test_stats["acc1"]:
-            writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
+            # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
             max_accuracy = test_stats["acc1"]
             if args.output_dir:
                 checkpoint_paths = [output_dir / "best_checkpoint.pth"]
@@ -751,6 +765,15 @@ def main(args):
                     )
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
+        writer.log_scalar("max_acc", max_accuracy, epoch)
+
+        # for name, m in model.named_modules():
+        # if isinstance(m, (Gate)):
+        # pass_perc = m._skipped_tokens / m._total_tokens
+        # writer.log_scalar(name, pass_perc, epoch)
+        # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
+        # m._skipped_tokens = 0.0
+        # m._total_tokens = 0.0
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
