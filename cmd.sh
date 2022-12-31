@@ -11,4 +11,5 @@ CUDA_VISIBLE_DEVICES=$cuda python main.py --model $model --data-set CIFAR10 --da
                 --unscale-lr --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
                 --starting-threshold $start_threshold --target-threshold $target_threshold \
                 --output_dir cifar-models/$model/scratch_${starting_threshold}_${target_threshold}/$n\
+		#--warmup-epochs 1
                # --finetune https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth
