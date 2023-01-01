@@ -132,7 +132,7 @@ def forward_residule_moe(self, x):
     skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
     tk = x * mask[:, :, 1].unsqueeze(dim=-1)
 
-    x = self.drop_path(self.attn(tk)) + tk + skip_tk
+    x = self.drop_path(self.attn(tk)) + x  # tk + skip_tk
     x = self.norm2(x)
 
     mask = self.moe_gate(x)
@@ -140,7 +140,7 @@ def forward_residule_moe(self, x):
     skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
     tk = x * mask[:, :, 1].unsqueeze(dim=-1)
 
-    x = self.drop_path(self.mlp(tk)) + tk + skip_tk
+    x = self.drop_path(self.mlp(tk)) + x  # $ + tk + skip_tk
 
     return x
 

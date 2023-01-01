@@ -420,7 +420,7 @@ def get_args_parser():
 
     parser.add_argument(
         "--gate-lr",
-        default=1e-3,
+        default=1e-4,
         type=float,
         help="set learning for skip gates apart from the rest of our model",
     )
@@ -726,7 +726,7 @@ def main(args):
     delta: typ.Dict[str, typ.Tuple[float, int]] = {}
     offset = args.gate_epoch_offset
     i = 0
-    for name, module in model.named_modules():
+    for name, module in list(model.named_modules())[::-1]:
         if isinstance(module, (Gate)):
             delta[name] = (
                 (module._threshold - module.threshold)
