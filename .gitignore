@@ -13,3 +13,5 @@ logs
 dist
 **/.DS_Store
 .idea
+dataset/*
+cifar-models/
