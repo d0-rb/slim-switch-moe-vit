@@ -37,6 +37,7 @@ class Gate(nn.Module):
         dropout: float = 0.0,
         target_threshold: float = 0.9,
         starting_threshold: float = 1.0,
+        is_hard: float = True,
     ):
         super().__init__()
         self.head = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_dim, 1))
@@ -46,6 +47,9 @@ class Gate(nn.Module):
         self._total_tokens = 0
         self._skipped_tokens = 0
 
+        self.is_hard = is_hard
+        self.disable = False
+
     def step(self, delta: th.Tensor):
         thresh = self._threshold - delta
         self._threshold.data.copy_(
@@ -53,15 +57,19 @@ class Gate(nn.Module):
         )  # type: ignore[operator]
 
     def forward(self, x):
+        if self.disable:
+            ret = th.zeros((x.size(0), x.size(1), 2)).to(x.device)
+            ret[:, :, 1] = 1
+            return ret
+
         # x.shape (B x Tokens x dim)
-        B, T, D = x.shape
         out = self.head(x)  # (B x Token x 1)
 
         threshold = self._threshold if self.training else self.threshold
         prob = th.sigmoid(out)
         _prob = 1 - prob
 
-        if self.training:
+        if self.training and not self.is_hard:
             skip_tk = _prob
             tk = prob
         else:
