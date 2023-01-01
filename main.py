@@ -30,6 +30,7 @@ import models
 import utils
 from augment import new_data_aug_generator
 from datasets import build_dataset
+from datasets import build_split_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
@@ -430,6 +431,17 @@ def get_args_parser():
         type=float,
         help="num epoch apart in which gate will start to train",
     )
+    parser.add_argument(
+        '--num-tasks',
+        default=1,
+        type=int,
+        help='number of tasks to split dataset into for continual learning'
+    )
+    parser.add_argument(
+        '--rehearsal',
+        action='store_true',
+        help='whether to do rehearsal on past tasks or not'
+    )
 
     return parser
 
@@ -451,58 +463,35 @@ def main(args):
     # random.seed(seed)
 
     cudnn.benchmark = True
+    
+    dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
 
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
+    # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+    # dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    if True:  # args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
-        if args.repeated_aug:
-            sampler_train = RASampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        else:
-            sampler_train = torch.utils.data.DistributedSampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        if args.dist_eval:
-            if len(dataset_val) % num_tasks != 0:
-                print(
-                    "Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. "
-                    "This will slightly alter validation results as extra duplicate entries are added to achieve "
-                    "equal num of samples per-process."
-                )
-            sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
-            )
-        else:
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-
-    # TODO: replace this with get_split_cifar100 ?
-
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-    if args.ThreeAugment:
-        data_loader_train.dataset.transform = new_data_aug_generator(args)
-
-    data_loader_val = torch.utils.data.DataLoader(
-        dataset_val,
-        sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=False,
-    )
+    # if True:  # args.distributed:
+    #     num_tasks = utils.get_world_size()
+    #     global_rank = utils.get_rank()
+    #     if args.repeated_aug:
+    #         sampler_train = RASampler(
+    #             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+    #         )
+    #     else:
+    #         sampler_train = torch.utils.data.DistributedSampler(
+    #             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+    #         )
+    #     if args.dist_eval:
+    #         if len(dataset_val) % num_tasks != 0:
+    #             print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+    #                   'This will slightly alter validation results as extra duplicate entries are added to achieve '
+    #                   'equal num of samples per-process.')
+    #         sampler_val = torch.utils.data.DistributedSampler(
+    #             dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+    #     else:
+    #         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    # else:
+    #     sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    #     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0.0 or args.cutmix_minmax is not None
@@ -632,13 +621,13 @@ def main(args):
         ]
         return ret
 
-    optimizer = create_optimizer(
-        model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
-    )
+    # optimizer = create_optimizer(
+    #     model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
+    # )
 
-    loss_scaler = NativeScaler()
+    # loss_scaler = NativeScaler()
 
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    # lr_scheduler, _ = create_scheduler(args, optimizer)
 
     criterion = LabelSmoothingCrossEntropy()
 
@@ -712,85 +701,121 @@ def main(args):
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
         lr_scheduler.step(args.start_epoch)
-    if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
-        print(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-        )
-        return
+    
+    last_task_end = 0
 
-    print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
-    max_accuracy = 0.0
+    for task_idx in range(args.num_tasks):
+        optimizer = create_optimizer(args, model_without_ddp)
+        loss_scaler = NativeScaler()
 
-    delta: typ.Dict[str, typ.Tuple[float, int]] = {}
-    offset = args.gate_epoch_offset
-    i = 0
-    for name, module in model.named_modules():
-        if isinstance(module, (Gate)):
-            delta[name] = (
-                (module._threshold - module.threshold)
-                / (args.epochs - args.warmup_epochs - offset * i),
-                i * offset + args.warmup_epochs,
-            )
-            i += 1
-            module.disable = True
-    print(delta)
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
+        lr_scheduler, _ = create_scheduler(args, optimizer)
 
-        train_stats = train_one_epoch(
-            model,
-            criterion,
-            data_loader_train,
-            optimizer,
-            device,
-            epoch,
-            loss_scaler,
-            args.clip_grad,
-            model_ema,
-            mixup_fn,
-            set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
-            args=args,
+        current_task_end = (args.nb_classes * (task_idx + 1)) // args.num_tasks
+        current_task_nb_classes = current_task_end - last_task_end
+
+        dataset_train, args.nb_classes = build_split_dataset(
+            is_train=True,
+            opt=args,
+            start_class=last_task_end,
+            class_size=current_task_nb_classes
         )
 
-        lr_scheduler.step(epoch)
-        for name, module in model.named_modules():
-            if name in delta and epoch >= delta[name][-1]:
-                module.disable = False
-                module.step(delta[name][0])
-                print(f"{name=} {module._threshold}")
-
-        if args.output_dir:
-            checkpoint_paths = [output_dir / "checkpoint.pth"]
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master(
-                    {
-                        "model": model_without_ddp.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "epoch": epoch,
-                        "model_ema": get_state_dict(model_ema),
-                        "scaler": loss_scaler.state_dict(),
-                        "args": args,
-                    },
-                    checkpoint_path,
+        if True:  # args.distributed:
+            num_tasks = utils.get_world_size()
+            global_rank = utils.get_rank()
+            if args.repeated_aug:
+                sampler_train = RASampler(
+                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
                 )
+            else:
+                sampler_train = torch.utils.data.DistributedSampler(
+                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                )
+            if args.dist_eval:
+                if len(dataset_val) % num_tasks != 0:
+                    print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+                          'This will slightly alter validation results as extra duplicate entries are added to achieve '
+                          'equal num of samples per-process.')
+                sampler_val = torch.utils.data.DistributedSampler(
+                    dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+            else:
+                sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
-        test_stats = evaluate(data_loader_val, model, device)
-        print(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+        if args.ThreeAugment:
+            data_loader_train.dataset.transform = new_data_aug_generator(args)
+        
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train, sampler=sampler_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
         )
 
-        writer.log_test_acc(test_stats["acc1"], epoch)
-        writer.log_loss(train_stats["loss"], epoch)
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val, sampler=sampler_val,
+            batch_size=int(1.5 * args.batch_size),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False
+        )
 
-        if max_accuracy < test_stats["acc1"]:
-            # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-            max_accuracy = test_stats["acc1"]
+        if args.eval:
+            test_stats = evaluate(data_loader_val, model, device)
+            print(
+                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+            )
+            return
+
+        print(f"Starting task {task_idx}/{args.num_tasks - 1}, learning {current_task_nb_classes} classes for {args.epochs} epochs")
+
+        start_time = time.time()
+        max_accuracy = 0.0
+
+        delta: typ.Dict[str, typ.Tuple[float, int]] = {}
+        offset = args.gate_epoch_offset
+        i = 0
+        for name, module in model.named_modules():
+            if isinstance(module, (Gate)):
+                delta[name] = (
+                    (module._threshold - module.threshold)
+                    / (args.epochs - args.warmup_epochs - offset * i),
+                    i * offset + args.warmup_epochs,
+                )
+                i += 1
+                module.disable = True
+        print(delta)
+        for epoch in range(task_idx * args.epochs, (task_idx + 1) * args.epochs):
+            if args.distributed:
+                data_loader_train.sampler.set_epoch(epoch)
+
+            train_stats = train_one_epoch(
+                model,
+                criterion,
+                data_loader_train,
+                optimizer,
+                device,
+                epoch,
+                loss_scaler,
+                args.clip_grad,
+                model_ema,
+                mixup_fn,
+                set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
+                args=args,
+            )
+
+            lr_scheduler.step(epoch)
+            for name, module in model.named_modules():
+                if name in delta and epoch >= delta[name][-1]:
+                    module.disable = False
+                    module.step(delta[name][0])
+                    print(f"{name=} {module._threshold}")
+
             if args.output_dir:
-                checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                checkpoint_paths = [output_dir / "checkpoint.pth"]
                 for checkpoint_path in checkpoint_paths:
                     utils.save_on_master(
                         {
@@ -805,27 +830,56 @@ def main(args):
                         checkpoint_path,
                     )
 
-        print(f"Max accuracy: {max_accuracy:.2f}%")
-        writer.log_scalar("max_acc", max_accuracy, epoch)
+            test_stats = evaluate(data_loader_val, model, device)
+            print(
+                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+            )
 
-        # for name, m in model.named_modules():
-        # if isinstance(m, (Gate)):
-        # pass_perc = m._skipped_tokens / m._total_tokens
-        # writer.log_scalar(name, pass_perc, epoch)
-        # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
-        # m._skipped_tokens = 0.0
-        # m._total_tokens = 0.0
+            writer.log_test_acc(test_stats["acc1"], epoch)
+            writer.log_loss(train_stats["loss"], epoch)
 
-        log_stats = {
-            **{f"train_{k}": v for k, v in train_stats.items()},
-            **{f"test_{k}": v for k, v in test_stats.items()},
-            "epoch": epoch,
-            "n_parameters": n_parameters,
-        }
+            if max_accuracy < test_stats["acc1"]:
+                # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
+                max_accuracy = test_stats["acc1"]
+                if args.output_dir:
+                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                    for checkpoint_path in checkpoint_paths:
+                        utils.save_on_master(
+                            {
+                                "model": model_without_ddp.state_dict(),
+                                "optimizer": optimizer.state_dict(),
+                                "lr_scheduler": lr_scheduler.state_dict(),
+                                "epoch": epoch,
+                                "model_ema": get_state_dict(model_ema),
+                                "scaler": loss_scaler.state_dict(),
+                                "args": args,
+                            },
+                            checkpoint_path,
+                        )
 
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+            print(f"Max accuracy: {max_accuracy:.2f}%")
+            writer.log_scalar("max_acc", max_accuracy, epoch)
+
+            # for name, m in model.named_modules():
+            # if isinstance(m, (Gate)):
+            # pass_perc = m._skipped_tokens / m._total_tokens
+            # writer.log_scalar(name, pass_perc, epoch)
+            # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
+            # m._skipped_tokens = 0.0
+            # m._total_tokens = 0.0
+
+            log_stats = {
+                **{f"train_{k}": v for k, v in train_stats.items()},
+                **{f"test_{k}": v for k, v in test_stats.items()},
+                "epoch": epoch,
+                "n_parameters": n_parameters,
+            }
+
+            if args.output_dir and utils.is_main_process():
+                with (output_dir / "log.txt").open("a") as f:
+                    f.write(json.dumps(log_stats) + "\n")
+        
+        last_task_end = current_task_end
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
