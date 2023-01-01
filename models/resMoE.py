@@ -48,7 +48,6 @@ class Gate(nn.Module):
 
     def step(self, delta: th.Tensor):
         thresh = self._threshold - delta
-        print(thresh)
         self._threshold.data.copy_(
             max(thresh, self.threshold)  # type: ignore[call-overload]
         )  # type: ignore[operator]
