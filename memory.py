@@ -3,13 +3,13 @@ import torch
 
 
 class RehearsalMemory:
-    def __init__(self, max_size, input_shape, output_shape, device, dataset=None):
+    def __init__(self, max_size, input_shape, output_shape, device, use_indices=False):  
         self.size = 0
         self.max_size = max_size
         self.device = device
-        self.dataset = dataset
+        self.use_indices = use_indices
         
-        if self.dataset:  # if we have an existing dataset, we can just use the indices of that dataset instead of storing the samples
+        if self.use_indices:  # if we have an existing dataset, we can just use the indices of that dataset instead of storing the samples
             self._batch = torch.empty((self.max_size,), device=device)
             self._labels = torch.empty((self.max_size,), device=device)
         else:
@@ -27,7 +27,7 @@ class RehearsalMemory:
         samples = batch[idx]  # randomly selected samples from batch to be saved
         sample_labels = labels[idx]  # corresponding labels
         
-        if self.size + self.num_samples > self.max_size:  # if we are going to overfill memory
+        if self.size + num_samples > self.max_size:  # if we are going to overfill memory
             free_space = self.max_size - self.size
             self._batch[self.size:self.size + free_space] = samples[:free_space]
             self._labels[self.size:self.size + free_space] = sample_labels[:free_space]
@@ -42,23 +42,13 @@ class RehearsalMemory:
             self._batch[self.size:self.size + num_samples] = samples
             self._labels[self.size:self.size + num_samples] = sample_labels
         
-        self.size = min(self.max_size, self.size + self.num_samples)
+        self.size = min(self.max_size, self.size + num_samples)
 
 
     @property
     def batch(self):
-        if self.dataset:
-            batch, labels = self.dataset[:self.size]
-
-            return batch
-        else:
-            return self._batch[:self.size]
+        return self._batch[:self.size]
     
     @property
     def labels(self):
-        if self.dataset:
-            batch, labels = self.dataset[:self.size]
-            
-            return labels
-        else:
-            return self._labels[:self.size]
+        return self._labels[:self.size]

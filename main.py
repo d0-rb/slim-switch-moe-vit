@@ -440,6 +440,7 @@ def get_args_parser():
     )
     parser.add_argument(
         '--rehearsal',
+        default=False,
         action='store_true',
         help='whether to do rehearsal on past tasks or not'
     )
@@ -634,10 +635,10 @@ def main(args):
 
         memory_replay = RehearsalMemory(
             args.rehearsal_batch_size,
-            (3, *args.input_size),
+            (3, *[args.input_size] * 2),
             (args.nb_classes,),
             device=args.device,
-            dataset=build_dataset(True, args)
+            use_indices=True
         )
 
     # optimizer = create_optimizer(
@@ -724,7 +725,9 @@ def main(args):
     last_task_end = 0
 
     for task_idx in range(args.num_tasks):
-        optimizer = create_optimizer(args, model_without_ddp)
+        optimizer = create_optimizer(
+            model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
+        )
         loss_scaler = NativeScaler()
 
         lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -732,11 +735,11 @@ def main(args):
         current_task_end = (args.nb_classes * (task_idx + 1)) // args.num_tasks
         current_task_nb_classes = current_task_end - last_task_end
 
-        dataset_train, args.nb_classes = build_split_dataset(
+        dataset_train, args.nb_classes, dataset_indices = build_split_dataset(
             is_train=True,
             opt=args,
             start_class=last_task_end,
-            class_size=current_task_nb_classes
+            class_size=current_task_nb_classes,
         )
 
         if True:  # args.distributed:
@@ -806,7 +809,18 @@ def main(args):
                 )
                 i += 1
                 module.disable = True
-        print(delta)
+        # print(delta)
+
+        if args.rehearsal:
+            print(f"Sampling from current task to add to rehearsal memory...")
+
+            dataset_indices = dataset_indices.detach().to(device)
+            max_rehearsal_samples = args.rehearsal_batch_size // (task_idx + 1)
+            rehearsal_sample_idx_idx = torch.randperm(len(dataset_indices), device=args.device)[:max_rehearsal_samples]  # random indices of subset indices
+            rehearsal_sample_idx = dataset_indices[rehearsal_sample_idx_idx]  # randomly sampled subset indices
+            
+            memory_replay.add(rehearsal_sample_idx, rehearsal_sample_idx, rehearsal_sample_idx.shape[0])
+
         for epoch in range(task_idx * args.epochs, (task_idx + 1) * args.epochs):
             if args.distributed:
                 data_loader_train.sampler.set_epoch(epoch)
@@ -829,10 +843,10 @@ def main(args):
             # rehearsal stage
             if args.rehearsal:
                 samples_idx = memory_replay.batch
-                targets_idx = memory_replay.labels
 
-                samples = dataset_train.dataset[samples_idx]
-                targets = dataset_train.dataset[targets_idx]
+                samples = torch.tensor([dataset_train.dataset[sample_idx] for sample_idx in samples_idx])
+                targets = samples[:, 1]
+                samples = samples[:, 0]
 
                 if mixup_fn is not None:
                     samples, targets = mixup_fn(samples, targets)

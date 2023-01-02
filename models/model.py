@@ -10,8 +10,10 @@ from timm.models.layers import trunc_normal_
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg
 
-from .vision_transformer import VisionTransformer, SwitchableVisionTransformer, MoEVisionTransformer
-from .layers import SwitchableLayerNorm, LayerNorm
+from .layers import LayerNorm
+from .layers import SwitchableLayerNorm
+from .vision_transformer import SwitchableVisionTransformer
+from .vision_transformer import VisionTransformer
 
 
 __all__ = [

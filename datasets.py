@@ -147,9 +147,10 @@ def build_split_dataset(is_train, opt, start_class, class_size=5):
     targets = torch.tensor(dataset.targets)
     target_idx = ((targets >= start_class) & (targets < end_class))
 
-    subset = torch.utils.data.dataset.Subset(dataset, np.where(target_idx==1)[0])
+    indices = torch.nonzero(target_idx.squeeze(dim=-1)).squeeze(dim=-1)
+    subset = torch.utils.data.dataset.Subset(dataset, indices)
 
-    return subset, nb_classes
+    return subset, nb_classes, indices
 
 
 class INatDataset(ImageFolder):
