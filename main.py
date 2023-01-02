@@ -31,6 +31,7 @@ import utils
 from augment import new_data_aug_generator
 from datasets import build_dataset
 from datasets import build_split_dataset
+from memory import RehearsalMemory
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
@@ -442,6 +443,12 @@ def get_args_parser():
         action='store_true',
         help='whether to do rehearsal on past tasks or not'
     )
+    parser.add_argument(
+        '--rehearsal-batch-size',
+        default=512,
+        type=int,
+        help='number of tasks to split dataset into for continual learning'
+    )
 
     return parser
 
@@ -620,6 +627,12 @@ def main(args):
             {"params": gate_params, "lr": args.gate_lr},
         ]
         return ret
+    
+
+    if args.rehearsal:
+        print('setting up rehearsal memory')
+
+        memory_replay = RehearsalMemory(args.rehearsal_batch_size, (3, *args.input_size), (args.nb_classes,), device=args.device)
 
     # optimizer = create_optimizer(
     #     model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
@@ -806,6 +819,40 @@ def main(args):
                 set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
                 args=args,
             )
+
+            # rehearsal stage
+            if args.rehearsal:
+                samples = memory_replay.batch
+                targets = memory_replay.labels
+
+                if mixup_fn is not None:
+                    samples, targets = mixup_fn(samples, targets)
+
+                if args.bce_loss:
+                    targets = targets.gt(0.0).type(targets.dtype)
+
+                with torch.cuda.amp.autocast():
+                    outputs = model(samples)
+                    loss = criterion(samples, outputs, targets)
+
+                optimizer.zero_grad()
+
+                # this attribute is added by timm on one optimizer (adahessian)
+                is_second_order = (
+                    hasattr(optimizer, "is_second_order") and optimizer.is_second_order
+                )
+                loss_scaler(
+                    loss,
+                    optimizer,
+                    clip_grad=args.clip_grad,
+                    parameters=model.parameters(),
+                    create_graph=is_second_order,
+                )
+
+                torch.cuda.synchronize()
+                if model_ema is not None:
+                    model_ema.update(model)
+                
 
             lr_scheduler.step(epoch)
             for name, module in model.named_modules():
