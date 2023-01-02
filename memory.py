@@ -3,12 +3,18 @@ import torch
 
 
 class RehearsalMemory:
-    def __init__(self, max_size, input_shape, output_shape, device):
+    def __init__(self, max_size, input_shape, output_shape, device, dataset=None):
         self.size = 0
         self.max_size = max_size
         self.device = device
-        self._batch = torch.empty((self.max_size, *input_shape), device=device)
-        self._labels = torch.empty((self.max_size, *output_shape), device=device)
+        self.dataset = dataset
+        
+        if self.dataset:  # if we have an existing dataset, we can just use the indices of that dataset instead of storing the samples
+            self._batch = torch.empty((self.max_size,), device=device)
+            self._labels = torch.empty((self.max_size,), device=device)
+        else:
+            self._batch = torch.empty((self.max_size, *input_shape), device=device)
+            self._labels = torch.empty((self.max_size, *output_shape), device=device)
 
     
     # randomly select num_samples from batch tensor to add into memory. if memory is full, randomly replace some existing samples
@@ -41,8 +47,18 @@ class RehearsalMemory:
 
     @property
     def batch(self):
-        return self._batch[:self.size]
+        if self.dataset:
+            batch, labels = self.dataset[:self.size]
+
+            return batch
+        else:
+            return self._batch[:self.size]
     
     @property
     def labels(self):
-        return self._labels[:self.size]
+        if self.dataset:
+            batch, labels = self.dataset[:self.size]
+            
+            return labels
+        else:
+            return self._labels[:self.size]

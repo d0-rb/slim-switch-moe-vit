@@ -632,7 +632,13 @@ def main(args):
     if args.rehearsal:
         print('setting up rehearsal memory')
 
-        memory_replay = RehearsalMemory(args.rehearsal_batch_size, (3, *args.input_size), (args.nb_classes,), device=args.device)
+        memory_replay = RehearsalMemory(
+            args.rehearsal_batch_size,
+            (3, *args.input_size),
+            (args.nb_classes,),
+            device=args.device,
+            dataset=build_dataset(True, args)
+        )
 
     # optimizer = create_optimizer(
     #     model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
@@ -822,8 +828,11 @@ def main(args):
 
             # rehearsal stage
             if args.rehearsal:
-                samples = memory_replay.batch
-                targets = memory_replay.labels
+                samples_idx = memory_replay.batch
+                targets_idx = memory_replay.labels
+
+                samples = dataset_train.dataset[samples_idx]
+                targets = dataset_train.dataset[targets_idx]
 
                 if mixup_fn is not None:
                     samples, targets = mixup_fn(samples, targets)
