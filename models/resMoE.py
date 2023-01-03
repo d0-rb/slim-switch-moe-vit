@@ -5,11 +5,28 @@ import torch as th
 import torch.nn as nn
 from fmoe import FMoETransformerMLP  # type: ignore[import]
 from timm.models import register_model  # type: ignore[import]
+from torch.autograd import Variable
 
 from .model import DistilledVisionTransformer as Deit
 from .vision_transformer import Block
 
 __all__ = ["Gate", "ResBlock", "resmoe_tiny_patch16_224_expert8"]
+
+
+def sampler(tensor, tau, temperature):
+    """gumbel noise addition
+
+    :input: TODO
+    :tau: TODO
+    :temperature: TODO
+    :returns: TODO
+
+    """
+    noise = th.rand_like(tensor)
+    noise.add_(1e-9).log_().neg_()
+    noise.add_(1e-9).log_().neg_()
+    noise = Variable(noise)
+    return (tensor + noise) / tau + temperature
 
 
 class CustomizedMoEMLP(FMoETransformerMLP):
@@ -34,13 +51,17 @@ class Gate(nn.Module):
         self,
         in_dim: int,
         tau: float,
-        dropout: float = 0.0,
+        dropout: float = 0.5,
         target_threshold: float = 0.9,
         starting_threshold: float = 1.0,
         is_hard: float = True,
     ):
         super().__init__()
-        self.head = nn.Sequential(nn.Dropout(p=dropout), nn.Linear(in_dim, 1))
+        self.head = nn.Sequential(
+            nn.Dropout(p=dropout),
+            # nn.Linear(in_dim, in_dim // 2),
+            nn.Linear(in_dim, 1),
+        )
         self.register_buffer("_threshold", th.tensor(starting_threshold))
         self.register_buffer("threshold", th.tensor(target_threshold))
 
@@ -56,33 +77,55 @@ class Gate(nn.Module):
             max(thresh, self.threshold)  # type: ignore[call-overload]
         )  # type: ignore[operator]
 
-    def forward(self, x):
+    def forward(
+        self, x
+    ) -> typ.Tuple[th.Tensor, typ.Optional[th.Tensor], typ.Optional[th.Tensor]]:
         if self.disable:
-            ret = th.zeros((x.size(0), x.size(1), 2)).to(x.device)
-            ret[:, :, 1] = 1
-            return ret
+            return x, None, None
 
-        # x.shape (B x Tokens x dim)
+        B, T, D = x.shape
+        cuda = x.device
+
+        threshold = self._threshold  # if self.training else self.threshold
+        density = int(x.size(1) * threshold)
+
         out = self.head(x)  # (B x Token x 1)
+        prob = th.sigmoid(out).squeeze()
 
-        threshold = self._threshold if self.training else self.threshold
-        prob = th.sigmoid(out)
-        _prob = 1 - prob
+        values, index = prob.topk(k=density, dim=1)
 
-        if self.training and not self.is_hard:
-            skip_tk = _prob
-            tk = prob
-        else:
-            skip_tk = (prob > threshold).float() + _prob.detach() - _prob
-            tk = (prob <= threshold).float() + prob.detach() - prob
+        tokens = self.index_select(x, index)
+        # + (values.detach() - values).unsqueeze(
+        # dim=-1
+        # )
 
-        ret = th.cat([skip_tk, tk], dim=-1)
-        # (B X token X 2)
+        skip_tokens = None
+        summary_token = None
+        if x.size(1) - density > 0:
 
-        self._total_tokens += math.prod(out.shape[0:2])
-        self._skipped_tokens += skip_tk.sum().detach().item()
+            values, index = prob.topk(k=x.size(1) - density, dim=1, largest=False)
+            skip_tokens = self.index_select(x, index)
+            # + (
+            # values.detach() - values
+            # ).unsqueeze(dim=-1)
+            values = values.softmax(dim=-1)
+            summary_token = (
+                (skip_tokens * values.unsqueeze(dim=-1)).sum(dim=1).unsqueeze(dim=1)
+            )
 
-        return ret
+        return tokens, skip_tokens, summary_token
+
+    def index_select(self, x, index):
+        """index_select code donated by Junru.
+
+        :x: TODO
+        :index: TODO
+        :returns: TODO
+
+        """
+        B, T, D = x.shape
+        index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
+        return th.gather(input=x, dim=1, index=index_repeat)
 
 
 class ResBlock(Block):
@@ -103,46 +146,56 @@ class ResBlock(Block):
 
     def forward(self, x):
         x = self.norm1(x)
-        # x.shape (B x Tokens x dim)
-
-        mask = self.dense_gate(x)
-
-        skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
-        tk = x * mask[:, :, 1].unsqueeze(dim=-1)
-
-        x = self.drop_path(self.attn(tk)) + tk + skip_tk
+        x = mask_and_forward(x, self.dense_gate, lambda x: self.drop_path(self.attn(x)))
         x = self.norm2(x)
-
-        mask = self.moe_gate(x)
-
-        skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
-        tk = x * mask[:, :, 1].unsqueeze(dim=-1)
-
-        x = self.drop_path(self.mlp(tk)) + tk + skip_tk
-
+        x = mask_and_forward(x, self.moe_gate, lambda x: self.drop_path(self.mlp(x)))
         return x
 
 
 def forward_residule_moe(self, x):
     x = self.norm1(x)
-    # x.shape (B x Tokens x dim)
-
-    mask = self.dense_gate(x)
-
-    skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
-    tk = x * mask[:, :, 1].unsqueeze(dim=-1)
-
-    x = self.drop_path(self.attn(tk)) + x  # tk + skip_tk
+    x = mask_and_forward(x, self.dense_gate, lambda x: self.drop_path(self.attn(x)))
     x = self.norm2(x)
-
-    mask = self.moe_gate(x)
-
-    skip_tk = x * mask[:, :, 0].unsqueeze(dim=-1)
-    tk = x * mask[:, :, 1].unsqueeze(dim=-1)
-
-    x = self.drop_path(self.mlp(tk)) + x  # $ + tk + skip_tk
-
+    x = mask_and_forward(x, self.moe_gate, lambda x: self.drop_path(self.mlp(x)))
     return x
+
+
+def mask_and_forward(
+    input_: th.Tensor,
+    mask_fn: typ.Callable,
+    fwd_fn: typ.Callable,
+    is_cls_tk: bool = True,
+):
+    cls_token: th.Tensor
+    patch_tk: th.Tensor
+    tokens: th.Tensor
+    skip_tk: th.Tensor
+    summary_token: th.Tensor
+
+    if is_cls_tk:
+        cls_token = input_[:, 0].unsqueeze(dim=1)
+        patch_tk = input_[:, 1::]
+    else:
+        patch_tk = input_
+
+    tokens, skip_tk, summary_token = mask_fn(patch_tk)  # , 1::])
+    if is_cls_tk:
+        tokens = th.cat((cls_token, tokens), dim=1)
+    if summary_token is not None:
+        tokens = th.cat((tokens, summary_token), dim=1)
+
+    tokens_fwd = fwd_fn(tokens)  # + tokens
+
+    if skip_tk is not None:
+        skip_tk = skip_tk + tokens_fwd[:, -1].unsqueeze(dim=1).tile(
+            skip_tk.size(1)
+        ).view(skip_tk.shape)
+
+        tokens = th.cat(((tokens_fwd + tokens)[:, 0:-1], skip_tk), dim=1)
+    else:
+        tokens = tokens_fwd + tokens
+
+    return tokens
 
 
 from .model import deit_tiny_patch16_224

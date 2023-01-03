@@ -600,7 +600,7 @@ def main(args):
 
     model_ema = None
     if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        # meanportant to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
@@ -726,16 +726,16 @@ def main(args):
     delta: typ.Dict[str, typ.Tuple[float, int]] = {}
     offset = args.gate_epoch_offset
     i = 0
-    for name, module in list(model.named_modules())[::-1]:
-        if isinstance(module, (Gate)):
-            delta[name] = (
-                (module._threshold - module.threshold)
-                / (args.epochs - args.warmup_epochs - offset * i),
-                i * offset + args.warmup_epochs,
-            )
-            i += 1
-            module.disable = True
-    print(delta)
+    # for name, module in model.named_modules():
+    # if isinstance(module, (Gate)):
+    # delta[name] = (
+    # (module._threshold - module.threshold)
+    # / (args.epochs - args.warmup_epochs - offset * i),
+    # i * offset + args.warmup_epochs,
+    # )
+    # i += 1
+    # module.disable = True
+    # print(delta)
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
@@ -756,11 +756,6 @@ def main(args):
         )
 
         lr_scheduler.step(epoch)
-        for name, module in model.named_modules():
-            if name in delta and epoch >= delta[name][-1]:
-                module.disable = False
-                module.step(delta[name][0])
-                print(f"{name=} {module._threshold}")
 
         if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]
@@ -779,6 +774,13 @@ def main(args):
                 )
 
         test_stats = evaluate(data_loader_val, model, device)
+
+        # for name, module in model.named_modules():
+        # if name in delta and epoch >= delta[name][-1]:
+        # module.disable = False
+        # module.step(delta[name][0])
+        # print(f"{name=} {module._threshold}")
+
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )

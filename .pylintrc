@@ -98,8 +98,7 @@ suggestion-mode=yes
 unsafe-load-any-extension=no
 
 # In verbose mode, extra non-checker-related info will be displayed.
-#verbose=
-
+#verbos->typ.Tuple[th.Tensor, typ.Optional[th.Tensor], typ.Optional[th.Tensor]]:
 
 [BASIC]
 
@@ -135,7 +134,7 @@ bad-names-rgxs=
 class-attribute-naming-style=any
 
 # Regular expression matching correct class attribute names. Overrides class-
-# attribute-naming-style. If left empty, class attribute names will be checked
+# attribute-naming-styie. If left empty, class attribute names will be checked
 # with the set naming style.
 #class-attribute-rgx=
 
@@ -180,6 +179,7 @@ good-names=i,
            k,
            ex,
            Run,
+           x, B, T, D, k, tk
            _
 
 # Good variable names regexes, separated by a comma. If names match any regex,

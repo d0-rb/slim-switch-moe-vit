@@ -17,6 +17,7 @@ from timm.utils import ModelEma
 
 import utils
 from losses import DistillationLoss
+from models.resMoE import Gate
 
 
 def train_one_epoch(
@@ -57,7 +58,8 @@ def train_one_epoch(
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+            continue
+            # sys.exit(1)
 
         optimizer.zero_grad()
 
@@ -65,6 +67,12 @@ def train_one_epoch(
         is_second_order = (
             hasattr(optimizer, "is_second_order") and optimizer.is_second_order
         )
+        # loss.backward()
+        # for name, module in model.named_modules():
+        # if isinstance(module, (Gate)) and "dense_gate" in name:
+        # print(f"{name=} {module.head[1].weight.grad.norm()}")
+        # print(loss.item())
+        # optimizer.step()
         loss_scaler(
             loss,
             optimizer,
