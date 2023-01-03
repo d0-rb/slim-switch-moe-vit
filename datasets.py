@@ -147,8 +147,11 @@ def build_split_dataset(is_train, opt, start_class, class_size=5):
     targets = torch.tensor(dataset.targets)
     target_idx = ((targets >= start_class) & (targets < end_class))
 
-    indices = torch.nonzero(target_idx.squeeze(dim=-1)).squeeze(dim=-1)
+    indices = np.nonzero(target_idx.squeeze(dim=-1)).squeeze(axis=-1)
     subset = torch.utils.data.dataset.Subset(dataset, indices)
+
+    # indices = None
+    # subset = torch.utils.data.dataset.Subset(dataset, np.where(target_idx==1)[0])
 
     return subset, nb_classes, indices
 

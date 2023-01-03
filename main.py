@@ -635,7 +635,7 @@ def main(args):
 
         memory_replay = RehearsalMemory(
             args.rehearsal_batch_size,
-            (3, *[args.input_size] * 2),
+            (3, args.input_size, args.input_size),
             (args.nb_classes,),
             device=args.device,
             use_indices=True
@@ -844,9 +844,9 @@ def main(args):
             if args.rehearsal:
                 samples_idx = memory_replay.batch
 
-                samples = torch.tensor([dataset_train.dataset[sample_idx] for sample_idx in samples_idx])
-                targets = samples[:, 1]
-                samples = samples[:, 0]
+                samples_targets = [dataset_train.dataset[sample_idx.item()] for sample_idx in samples_idx]
+                samples = torch.stack([sample_target[0] for sample_target in samples_targets]).to(device)
+                targets = torch.tensor([sample_target[1] for sample_target in samples_targets], device=device)
 
                 if mixup_fn is not None:
                     samples, targets = mixup_fn(samples, targets)

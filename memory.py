@@ -10,8 +10,8 @@ class RehearsalMemory:
         self.use_indices = use_indices
         
         if self.use_indices:  # if we have an existing dataset, we can just use the indices of that dataset instead of storing the samples
-            self._batch = torch.empty((self.max_size,), device=device)
-            self._labels = torch.empty((self.max_size,), device=device)
+            self._batch = torch.empty((self.max_size,), dtype=torch.int64, device=device)
+            self._labels = torch.empty((self.max_size,), dtype=torch.int64, device=device)
         else:
             self._batch = torch.empty((self.max_size, *input_shape), device=device)
             self._labels = torch.empty((self.max_size, *output_shape), device=device)
