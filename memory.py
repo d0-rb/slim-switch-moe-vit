@@ -15,6 +15,10 @@ class RehearsalMemory:
         else:
             self._batch = torch.empty((self.max_size, *input_shape), device=device)
             self._labels = torch.empty((self.max_size, *output_shape), device=device)
+    
+    
+    def __len__(self):
+        return self.size
 
     
     # randomly select num_samples from batch tensor to add into memory. if memory is full, randomly replace some existing samples

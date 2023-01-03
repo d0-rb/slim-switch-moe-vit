@@ -312,5 +312,8 @@ class TensorboardXTracker:
     def log_test_acc(self, acc, step):
         self.log_scalar("test_acc", acc, step)
 
+    def log_task_test_acc(self, acc, step):
+        self.log_scalar("task_test_acc", acc, step)
+
     def close(self):
         self.writer.close()

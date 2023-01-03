@@ -9,6 +9,8 @@ import os
 import time
 import typing as typ
 from pathlib import Path
+import sys
+import math
 
 import numpy as np
 import torch
@@ -475,31 +477,30 @@ def main(args):
     dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
 
     # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    # dataset_val, _ = build_dataset(is_train=False, args=args)
+    dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    # if True:  # args.distributed:
-    #     num_tasks = utils.get_world_size()
-    #     global_rank = utils.get_rank()
-    #     if args.repeated_aug:
-    #         sampler_train = RASampler(
-    #             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-    #         )
-    #     else:
-    #         sampler_train = torch.utils.data.DistributedSampler(
-    #             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-    #         )
-    #     if args.dist_eval:
-    #         if len(dataset_val) % num_tasks != 0:
-    #             print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-    #                   'This will slightly alter validation results as extra duplicate entries are added to achieve '
-    #                   'equal num of samples per-process.')
-    #         sampler_val = torch.utils.data.DistributedSampler(
-    #             dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
-    #     else:
-    #         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    # else:
-    #     sampler_train = torch.utils.data.RandomSampler(dataset_train)
-    #     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    if True:  # args.distributed:
+        num_tasks = utils.get_world_size()
+        global_rank = utils.get_rank()
+        if args.dist_eval:
+            if len(dataset_val) % num_tasks != 0:
+                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
+                      'equal num of samples per-process.')
+            sampler_val = torch.utils.data.DistributedSampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+        else:
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    else:
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val, sampler=sampler_val,
+        batch_size=int(1.5 * args.batch_size),
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False
+    )
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0.0 or args.cutmix_minmax is not None
@@ -742,6 +743,13 @@ def main(args):
             class_size=current_task_nb_classes,
         )
 
+        task_dataset_val, _, _ = build_split_dataset(
+            is_train=False,
+            opt=args,
+            start_class=last_task_end,
+            class_size=current_task_nb_classes,
+        )
+
         if True:  # args.distributed:
             num_tasks = utils.get_world_size()
             global_rank = utils.get_rank()
@@ -777,8 +785,8 @@ def main(args):
             drop_last=True,
         )
 
-        data_loader_val = torch.utils.data.DataLoader(
-            dataset_val, sampler=sampler_val,
+        task_data_loader_val = torch.utils.data.DataLoader(
+            task_dataset_val, sampler=sampler_val,
             batch_size=int(1.5 * args.batch_size),
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
@@ -792,7 +800,7 @@ def main(args):
             )
             return
 
-        print(f"Starting task {task_idx}/{args.num_tasks - 1}, learning {current_task_nb_classes} classes for {args.epochs} epochs")
+        print(f"Starting task {task_idx + 1}/{args.num_tasks}, learning {current_task_nb_classes} classes ({last_task_end}:{current_task_end}) for {args.epochs} epochs")
 
         start_time = time.time()
         max_accuracy = 0.0
@@ -810,16 +818,6 @@ def main(args):
                 i += 1
                 module.disable = True
         # print(delta)
-
-        if args.rehearsal:
-            print(f"Sampling from current task to add to rehearsal memory...")
-
-            dataset_indices = dataset_indices.detach().to(device)
-            max_rehearsal_samples = args.rehearsal_batch_size // (task_idx + 1)
-            rehearsal_sample_idx_idx = torch.randperm(len(dataset_indices), device=args.device)[:max_rehearsal_samples]  # random indices of subset indices
-            rehearsal_sample_idx = dataset_indices[rehearsal_sample_idx_idx]  # randomly sampled subset indices
-            
-            memory_replay.add(rehearsal_sample_idx, rehearsal_sample_idx, rehearsal_sample_idx.shape[0])
 
         for epoch in range(task_idx * args.epochs, (task_idx + 1) * args.epochs):
             if args.distributed:
@@ -857,6 +855,12 @@ def main(args):
                 with torch.cuda.amp.autocast():
                     outputs = model(samples)
                     loss = criterion(samples, outputs, targets)
+                
+                loss_value = loss.item()
+
+                if not math.isfinite(loss_value):
+                    print("rehersal Loss is {}, stopping training".format(loss_value))
+                    sys.exit(1)
 
                 optimizer.zero_grad()
 
@@ -875,6 +879,8 @@ def main(args):
                 torch.cuda.synchronize()
                 if model_ema is not None:
                     model_ema.update(model)
+                
+                print(f'Rehearsal:  lr: {optimizer.param_groups[0]["lr"]}  loss: {loss_value}')
                 
 
             lr_scheduler.step(epoch)
@@ -904,7 +910,13 @@ def main(args):
             print(
                 f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
             )
+            task_test_stats = evaluate(task_data_loader_val, model, device)
+            print(
+                f"Accuracy of the network on the {len(task_dataset_val)} test images for this task: {task_test_stats['acc1']:.1f}%"
+            )
 
+
+            writer.log_test_acc(task_test_stats["acc1"], epoch)
             writer.log_test_acc(test_stats["acc1"], epoch)
             writer.log_loss(train_stats["loss"], epoch)
 
@@ -948,6 +960,16 @@ def main(args):
             if args.output_dir and utils.is_main_process():
                 with (output_dir / "log.txt").open("a") as f:
                     f.write(json.dumps(log_stats) + "\n")
+
+        if args.rehearsal:
+            print(f"Sampling from recently completed task to add to rehearsal memory...")
+
+            dataset_indices = dataset_indices.detach().to(device)
+            max_rehearsal_samples = args.rehearsal_batch_size // (task_idx + 1)
+            rehearsal_sample_idx_idx = torch.randperm(len(dataset_indices), device=args.device)[:max_rehearsal_samples]  # random indices of subset indices
+            rehearsal_sample_idx = dataset_indices[rehearsal_sample_idx_idx]  # randomly sampled subset indices
+            
+            memory_replay.add(rehearsal_sample_idx, rehearsal_sample_idx, rehearsal_sample_idx.shape[0])
         
         last_task_end = current_task_end
 
