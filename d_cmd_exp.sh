@@ -3,6 +3,10 @@ read -p 'model: ' model #="deit_tiny_patch16_224"
 read -p 'cuda: ' cuda
 read -p 'num_cuda: ' num_cuda
 CUDA_VISIBLE_DEVICES=$cuda
+# read -p 'starting threshold: ' starting_threshold
+starting_threshold=1.0
+# read -p 'target threshold: ' target_threshold
+target_threshold=1.0
 
 for n in 0 1 2
 do
