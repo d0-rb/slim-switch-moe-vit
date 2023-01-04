@@ -106,6 +106,9 @@ class Gate(nn.Module):
                 dim=1, keepdim=True
             )
 
+        self._skipped_tokens = skip_tokens.shape[1]
+        self._total_tokens = x.shape[1]
+
         return tokens, skip_tokens, summary_token
 
     def index_select(self, x, index):
