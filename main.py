@@ -718,6 +718,16 @@ def main(args):
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )
         return
+    
+    vis = utils.TokenSkipVisualizer(
+        model=model,
+        device=device,
+        dataset=dataset_val,
+        num_samples=8,
+        writer=writer,
+        args=args,
+        skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
+    )
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -811,6 +821,8 @@ def main(args):
                         },
                         checkpoint_path,
                     )
+                
+                vis.savefig(epoch)
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
         # writer.log_scalar("max_acc", max_accuracy, epoch)
