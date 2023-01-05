@@ -120,6 +120,9 @@ class Gate(nn.Module):
                 dim=1, keepdim=True
             )
 
+            self._skipped_tokens += math.prod(index.shape)
+        self._total_tokens += math.prod(x.shape[0:2])
+
         return tokens, skip_tokens, summary_token, summary_skip_token
 
     def index_select(self, x, index):
@@ -268,8 +271,6 @@ def mask_and_forward(
         ),
         dim=1,
     )
-
-  
 
     tokens_fwd = fwd_fn(tokens)  # + tokens
     if summary_token:

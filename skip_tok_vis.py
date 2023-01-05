@@ -6,26 +6,29 @@ import argparse
 import os
 import time
 import typing as typ
-import matplotlib
 from pathlib import Path
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torchvision import transforms
 import torch.backends.cudnn as cudnn
-from timm.models import create_model  # type: ignore[import]
 from timm.data.constants import IMAGENET_DEFAULT_MEAN
 from timm.data.constants import IMAGENET_DEFAULT_STD
-from models.resMoE import Gate
-import matplotlib.pyplot as plt
+from timm.models import create_model  # type: ignore[import]
+from torchvision import transforms
 
 import utils
 from datasets import build_dataset
 from engine import evaluate
+from models.resMoE import Gate
 
 # import models_v2
 
-GATE_NAMES = ('dense_gate', 'moe_gate')  # names of gates IN THE ORDER OF WHICH THEY ARE PROCESSED
+GATE_NAMES = (
+    "dense_gate",
+    "moe_gate",
+)  # names of gates IN THE ORDER OF WHICH THEY ARE PROCESSED
 
 
 def get_args_parser():
@@ -134,7 +137,11 @@ def get_args_parser():
         "--gate-depth", default=0, type=int, help="depth of gate to visualize"
     )
     parser.add_argument(
-        "--gate-name", default="dense_gate", type=str, help="name of gate to visualize (dense_gate or moe_gate)", choices=GATE_NAMES,
+        "--gate-name",
+        default="dense_gate",
+        type=str,
+        help="name of gate to visualize (dense_gate or moe_gate)",
+        choices=GATE_NAMES,
     )
 
     return parser
@@ -202,11 +209,13 @@ def main(args):
     model.eval()
 
     negative_mean = [-channel_mean for channel_mean in IMAGENET_DEFAULT_MEAN]
-    inverse_std = [1/channel_std for channel_std in IMAGENET_DEFAULT_STD]
-    unnormalize = transforms.Compose([
-        transforms.Normalize(mean=[0., 0., 0.], std=inverse_std),
-        transforms.Normalize(mean=negative_mean, std=[1., 1., 1.]),
-    ])
+    inverse_std = [1 / channel_std for channel_std in IMAGENET_DEFAULT_STD]
+    unnormalize = transforms.Compose(
+        [
+            transforms.Normalize(mean=[0.0, 0.0, 0.0], std=inverse_std),
+            transforms.Normalize(mean=negative_mean, std=[1.0, 1.0, 1.0]),
+        ]
+    )
     indices = []  # will contain index mappings to be composed
 
     images, target = next(iter(data_loader_val))
@@ -221,7 +230,7 @@ def main(args):
 
     def add_idx(gate, _x, output):
         nonlocal indices
-        
+
         indices.append(gate.tk_idx.detach().cpu().numpy())
 
     def visualize_gate_output(gate, _x, output):
@@ -233,37 +242,48 @@ def main(args):
 
         nonlocal display_img
         nonlocal indices
-        
+
         indices.append(gate.tk_idx.detach().cpu().numpy())
         n = int(x.size(1) * gate.threshold)  # number of selected tokens
 
-        total_idx = np.repeat(np.expand_dims(np.arange(T), 0), B, axis=0)  # final idx mapping made by composing everything in indexes
+        total_idx = np.repeat(
+            np.expand_dims(np.arange(T), 0), B, axis=0
+        )  # final idx mapping made by composing everything in indexes
         for index in indices:  # composing all index mappings
             total_idx = np.take_along_axis(total_idx, index, axis=1)
 
         sel_idx = total_idx[:, :n]  # indices of selected tokens
         tk_mask = np.full((B, T), 0.4)
-        np.put_along_axis(tk_mask, sel_idx, np.ones_like(sel_idx), axis=1)  # np equivalent of torch.scatter to go from indices to mask
-        
-        tk_mask = np.reshape(tk_mask, (B, *grid_size, 1))  # tk_mask.shape (B, H_patch, W_patch, 1)
-        img_mask = np.kron(tk_mask, np.ones((1, *patch_size, 3)))  # img_mask.shape (B, H, W, 3)
+        np.put_along_axis(
+            tk_mask, sel_idx, np.ones_like(sel_idx), axis=1
+        )  # np equivalent of torch.scatter to go from indices to mask
+
+        tk_mask = np.reshape(
+            tk_mask, (B, *grid_size, 1)
+        )  # tk_mask.shape (B, H_patch, W_patch, 1)
+        img_mask = np.kron(
+            tk_mask, np.ones((1, *patch_size, 3))
+        )  # img_mask.shape (B, H, W, 3)
 
         display_img = img_mask * display_img
-        display_img = np.concatenate(display_img, axis=1)  # display_img.shape (H, W * B, 3)
+        display_img = np.concatenate(
+            display_img, axis=1
+        )  # display_img.shape (H, W * B, 3)
         plt.imshow(display_img)
 
-        output_path = output_dir / f'vis_depth_{args.gate_depth}_{args.gate_name}.png'
+        output_path = output_dir / f"vis_depth_{args.gate_depth}_{args.gate_name}.png"
         plt.savefig(output_path)
 
-        print(f'output at {output_path}')
+        print(f"output at {output_path}")
 
-
-    for depth in range(args.gate_depth):  # track all gates up to current gate in previous blocks
+    for depth in range(
+        args.gate_depth
+    ):  # track all gates up to current gate in previous blocks
         for gate_name in GATE_NAMES:
             current_gate = getattr(model.blocks[depth], gate_name)
 
             if not isinstance(current_gate, Gate):
-                print(f'invalid gate {gate_name} at block {depth}')
+                print(f"invalid gate {gate_name} at block {depth}")
                 return
 
             current_gate.register_forward_hook(add_idx)
