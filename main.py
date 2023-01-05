@@ -739,9 +739,9 @@ def main(args):
     for name, module in model.named_modules():
         if isinstance(module, (Gate)):
             delta[name] = (
-            (module._threshold - module.threshold)
-            / (args.epochs - offset),
-            offset,)
+                (module._threshold - module.threshold) / (args.epochs - offset),
+                offset,
+            )
             # i += 1
     # module.disable = True
     # print(delta)
@@ -765,8 +765,8 @@ def main(args):
         )
 
         lr_scheduler.step(epoch)
-        writer.log_scalar("train/lr/all", optimizer.param_groups[0]['lr'], epoch)
-        writer.log_scalar("train/lr/gate", optimizer.param_groups[1]['lr'], epoch)
+        writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+        writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
 
         if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]
@@ -786,22 +786,29 @@ def main(args):
 
         test_stats = evaluate(data_loader_val, model, device)
 
+        writer.log_scalar(
+            "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+        )
+
         for name, module in model.named_modules():
             if name in delta and epoch >= delta[name][-1]:
                 # module.disable = False
                 module.step(delta[name][0])
+                torch.cuda.reset_peak_memory_stats()
                 # print(f"{name=} {module._threshold}")
-                writer.log_scalar(f"threshold/{name}", module._threshold - delta[name][0], epoch)
+                writer.log_scalar(
+                    f"threshold/{name}", module._threshold - delta[name][0], epoch
+                )
 
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )
 
-        # writer.log_test_acc(test_stats["acc1"], epoch)
-        # writer.log_loss(train_stats["loss"], epoch)
-
         writer.log_scalar("train/loss", train_stats["loss"], epoch)
         writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+
+        if "loss_attn" in train_stats:
+            writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
 
         if max_accuracy < test_stats["acc1"]:
             # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
@@ -827,7 +834,6 @@ def main(args):
         print(f"Max accuracy: {max_accuracy:.2f}%")
         # writer.log_scalar("max_acc", max_accuracy, epoch)
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
-
 
         for name, m in model.named_modules():
             if isinstance(m, (Gate)):

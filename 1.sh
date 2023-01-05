@@ -1,6 +1,6 @@
 #!/bin/bash
 
-model=resmoe_tiny_patch16_224_expert8
+model=resmoe_tiny_patch16_224_expert8_attn_loss
 CUDA=0
 SEED=0
 START_THRESHOLD=0.9
@@ -8,7 +8,7 @@ TARGET_THRESHOLD=0.5
 LR=2e-4
 EPOCH=400
 
-CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model $model --data-set CIFAR10 --data-path ./dataset --batch 256 \
+CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model $model --data-set CIFAR10 --data-path ./dataset --batch 156 \
                 --lr ${LR} --epochs ${EPOCH} --weight-decay 0.05 --sched cosine --input-size 224 \
                 --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --drop 0.0 \
                 --seed ${SEED} --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \
