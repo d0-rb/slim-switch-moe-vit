@@ -70,6 +70,7 @@ class Gate(nn.Module):
 
         self.is_hard = is_hard
         self.disable = False
+        self.tk_idx = None
 
     def step(self, delta: th.Tensor):
         thresh = self._threshold - delta
@@ -83,7 +84,7 @@ class Gate(nn.Module):
         if self.disable:
             return x, None, None
 
-        # B, T, D = x.shape
+        B, T, D = x.shape
         # cuda = x.device
 
         threshold = self._threshold  # if self.training else self.threshold
@@ -93,6 +94,7 @@ class Gate(nn.Module):
         prob = th.sigmoid(out).squeeze()
 
         values, index = prob.topk(k=density, dim=1)
+        self.tk_idx = index
 
         tokens = self.index_select(x, index)
 
@@ -100,6 +102,7 @@ class Gate(nn.Module):
         summary_token = None
         if x.size(1) - density > 0:
             values, index = prob.topk(k=x.size(1) - density, dim=1, largest=False)
+            self.tk_idx = th.cat([self.tk_idx, index], dim=1)
             skip_tokens = self.index_select(x, index)
             values = values.softmax(dim=-1)
             summary_token = (skip_tokens * values.unsqueeze(dim=-1)).sum(
