@@ -100,6 +100,7 @@ class Gate(nn.Module):
         # prob = th.sigmoid(out)
 
         values, index = prob.topk(k=density, dim=1)
+
         tokens = self.index_select(x, index)
 
         if self.training:
@@ -265,6 +266,9 @@ def mask_and_forward(
         ),
         dim=1,
     )
+
+  
+
     tokens_fwd = fwd_fn(tokens)  # + tokens
     if summary_token:
         tokens_fwd = tokens_fwd[:, 0:-1]
@@ -388,14 +392,12 @@ def resmoe_tiny_patch16_224_expert8(
             module.dense_gate = Gate(
                 embed_dim,
                 1.0,
-                dropout=drop_rate,
                 starting_threshold=starting_threshold,
                 target_threshold=target_threshold,
             )
             module.moe_gate = Gate(
                 embed_dim,
                 1.0,
-                dropout=drop_rate,
                 starting_threshold=starting_threshold,
                 target_threshold=target_threshold,
             )
