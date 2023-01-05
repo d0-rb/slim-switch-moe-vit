@@ -787,6 +787,8 @@ def main(args):
 
         writer.log_test_acc(test_stats["acc1"], epoch)
         writer.log_loss(train_stats["loss"], epoch)
+        if "loss_attn" in train_stats:
+            writer.log_scalar("loss_attn", train_stats["loss_attn"], epoch)
 
         if max_accuracy < test_stats["acc1"]:
             # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
