@@ -18,6 +18,7 @@ from timm.utils import ModelEma
 import utils
 from losses import DistillationLoss
 from models.resMoE import Gate
+from models.vision_transformer import Block
 
 
 def train_one_epoch(
@@ -54,6 +55,14 @@ def train_one_epoch(
             outputs = model(samples)
             loss = criterion(samples, outputs, targets)
 
+        loss_attn = []
+        for name, module in model.named_modules():
+            if isinstance(module, Block) and hasattr(module, "attn_loss"):
+                loss_attn.append(module.attn_loss)
+
+        if len(loss_attn) > 0:
+            loss = loss + sum(loss_attn) / len(loss_attn)
+
         loss_value = loss.item()
 
         if not math.isfinite(loss_value):
@@ -85,8 +94,13 @@ def train_one_epoch(
         if model_ema is not None:
             model_ema.update(model)
 
+        if len(loss_attn) > 0:
+            metric_logger.update(loss_attn=sum(loss_attn).item() / len(loss_attn))
+
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
+        # break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -118,6 +132,8 @@ def evaluate(data_loader, model, device):
         metric_logger.update(loss=loss.item())
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
+
+        # break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print(
