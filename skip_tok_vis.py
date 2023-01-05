@@ -251,7 +251,11 @@ def main(args):
         display_img = img_mask * display_img
         display_img = np.concatenate(display_img, axis=1)  # display_img.shape (H, W * B, 3)
         plt.imshow(display_img)
-        plt.savefig(output_dir / 'fig.png')
+
+        output_path = output_dir / f'vis_depth_{args.gate_depth}_{args.gate_name}.png'
+        plt.savefig(output_path)
+
+        print(f'output at {output_path}')
 
 
     for depth in range(args.gate_depth):  # track all gates up to current gate in previous blocks
