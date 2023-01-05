@@ -371,7 +371,7 @@ class TokenSkipVisualizer:
             transforms.Normalize(mean=negative_mean, std=[1., 1., 1.]),
         ])
         self.indices = []  # will contain index mappings to be composed, should be reset before every visualization
-        self.vis_gates = [itertools.product(range(len(self.model.blocks)), self.GATE_NAMES)]  # which gates to output visualizations for (all by default)
+        self.vis_gates = [gate for gate in itertools.product(range(len(self.model.blocks)), self.GATE_NAMES)]  # which gates to output visualizations for (all by default)
         self.writer = writer
         self.skip_tk_brightness = skip_tk_brightness
         self.step = 0  # for tensorboard
@@ -403,9 +403,12 @@ class TokenSkipVisualizer:
         gate_tuple = (depth, name)
 
         def gate_hook(gate, _x, output):
+            if not self.track_idx:
+                return
+
             self.indices.append(gate.tk_idx.detach().cpu())
             
-            if gate_tuple not in self.vis_gates:
+            if not gate_tuple in self.vis_gates:
                 return
 
             # if we are to output a visualization for this layer
@@ -422,16 +425,16 @@ class TokenSkipVisualizer:
                 total_idx = torch.gather(total_idx, dim=1, index=index)
 
             sel_idx = total_idx[:, :n]  # indices of selected tokens
-            tk_mask = torch.full((B, T), self.skip_tk_brightness)
-            tk_mask.scatter_(dim=1, index=sel_idx, src=torch.ones_like(sel_idx))  # np equivalent of torch.scatter to go from indices to mask
+            tk_mask = torch.full((B, T), self.skip_tk_brightness, dtype=torch.float)
+            tk_mask.scatter_(dim=1, index=sel_idx, src=torch.ones_like(sel_idx, dtype=torch.float))  # np equivalent of torch.scatter to go from indices to mask
             
             tk_mask = tk_mask.view(B, 1, *self.grid_size)  # tk_mask.shape (B, H_patch, W_patch, 1)
             img_mask = torch.kron(tk_mask, torch.ones((1, 3, *self.patch_size)))  # img_mask.shape (B, 3, H, W)
 
-            display_img = img_mask * display_img
-            display_img = make_grid(display_img)
+            masked_img = img_mask * self.display_img
+            masked_img = make_grid(masked_img)
 
-            self.writer.add_tk_skp_vis(depth, name, display_img, self.step)
+            self.writer.add_tk_skp_vis(depth, name, masked_img, self.step)
             
         return gate_hook
     
@@ -468,4 +471,6 @@ class TokenSkipVisualizer:
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 self.model(self.images)
+        
+        self.track_idx = False
 
