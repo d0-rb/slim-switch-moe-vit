@@ -725,14 +725,14 @@ def main(args):
 
     delta: typ.Dict[str, typ.Tuple[float, int]] = {}
     offset = args.gate_epoch_offset
-    i = 0
+    # i = 0
     for name, module in model.named_modules():
         if isinstance(module, (Gate)):
             delta[name] = (
             (module._threshold - module.threshold)
-            / (args.epochs - offset * i),
-            i * offset,)
-            i += 1
+            / (args.epochs - offset),
+            offset,)
+            # i += 1
     # module.disable = True
     # print(delta)
     for epoch in range(args.start_epoch, args.epochs):
