@@ -81,24 +81,30 @@ class Gate(nn.Module):
         )  # type: ignore[operator]
 
     def forward(
-        self, x: th.Tensor, x_cls: th.Tensor | None = None
+        self, x: th.Tensor
     ) -> typ.Tuple[th.Tensor, th.Tensor | None, th.Tensor | None, th.Tensor | None]:
+
         if self.disable:
             return x, None, None, None
 
+        tokens: th.Tensor
+        skip_tokens: th.Tensor | None = None
+        summary_token: th.Tensor | None = None
+        summary_skip_token: th.Tensor | None = None
         # B, T, D = x.shape
         # cuda = x.device
 
         threshold = self._threshold  # if self.training else self.threshold
         density = int(x.size(1) * threshold)  # type: ignore[operator]
-        out = self.head(self.dropout(x)).squeeze()  # (B x Token x 1)
-        prob = th.sigmoid(out)
+        prob = self.head(self.dropout(x)).squeeze()  # (B x Token x 1)
+        # prob = th.sigmoid(out)
 
         values, index = prob.topk(k=density, dim=1)
         tokens = self.index_select(x, index)
 
-        values = values.softmax(dim=-1)
-        summary_token = (tokens * values.unsqueeze(dim=-1)).sum(dim=1, keepdim=True)
+        if self.training:
+            values = values.softmax(dim=-1)
+            summary_token = (tokens * values.unsqueeze(dim=-1)).sum(dim=1, keepdim=True)
 
         skip_tokens = None
         summary_token = None
@@ -148,28 +154,6 @@ class ResBlock(Block):
         x = self.norm2(x)
         x = mask_and_forward(x, self.moe_gate, lambda x: self.drop_path(self.mlp(x)))
         return x
-
-
-def forward_residule_moe_w_attn(self, x):
-    x = self.norm1(x)
-    x = mask_and_forward(
-        x,
-        self.dense_gate,
-        lambda x: self.drop_path(self.attn(x)),
-        self.is_clk_token,
-        self.is_dist_token,
-        feed_clk_tk_to_mask=True,
-    )
-    x = self.norm2(x)
-    x = mask_and_forward(
-        x,
-        self.moe_gate,
-        lambda x: self.drop_path(self.mlp(x)),
-        self.is_clk_token,
-        self.is_dist_token,
-        feed_clk_tk_to_mask=False,
-    )
-    return x
 
 
 def forward_residule_moe(self, x):
@@ -225,17 +209,21 @@ def forward_residule_moe_w_attn_loss(self, x):
 
 
 def forward_residule_vit(self, x):
+    def fwd_fn(x):
+        x = self.drop_path(self.attn(x))
+        x = self.norm2(x)
+        x = self.drop_path(self.mlp(x))
+        return x
+
     x = self.norm1(x)
 
     x = mask_and_forward(
         x,
         self.dense_gate,
-        lambda x: self.drop_path(self.attn(x)),
+        self.fwd_fn,
         self.is_clk_token,
         self.is_dist_token,
     )
-    x = self.norm2(x)
-    x = self.drop_path(self.mlp(x))
     return x
 
 
@@ -245,7 +233,6 @@ def mask_and_forward(
     fwd_fn: typ.Callable,
     is_cls_tk: bool = False,
     is_dist_tk: bool = False,
-    feed_clk_tk_to_mask: bool = False,
 ):
     cls_token: th.Tensor | None = None
     dist_token: th.Tensor | None = None
@@ -267,14 +254,7 @@ def mask_and_forward(
 
     patch_tk = input_[:, patch_idx::]
 
-    if is_cls_tk and feed_clk_tk_to_mask:
-        tokens, skip_tk, summary_token, summary_skip_token = mask_fn(
-            patch_tk, cls_token
-        )  # , 1::])
-    else:
-        tokens, skip_tk, summary_token, summary_skip_token = mask_fn(
-            patch_tk
-        )  # , 1::])
+    tokens, skip_tk, summary_token, summary_skip_token = mask_fn(patch_tk)  # , 1::])
 
     tokens = th.cat(
         list(
@@ -303,47 +283,6 @@ def mask_and_forward(
 
 from .model import deit_tiny_patch16_224
 from .model import deit_tiny_distilled_patch16_224
-
-
-@register_model
-def resmoe_tiny_patch16_224_expert8_attn(
-    pretrained=False, starting_threshold=1.0, target_threshold=0.9, **kwargs
-):
-    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
-    patch_size = 16
-    embed_dim = 192
-    depth = 12
-    num_heads = 3
-    mlp_ratio = 4
-    drop_rate = 0.0
-
-    for name, module in model.named_modules():
-        if isinstance(module, Block):
-            module.dense_gate = Gate(
-                embed_dim,
-                1.0,
-                starting_threshold=starting_threshold,
-                target_threshold=target_threshold,
-            )
-            module.moe_gate = Gate(
-                embed_dim,
-                1.0,
-                starting_threshold=starting_threshold,
-                target_threshold=target_threshold,
-            )
-
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=8,
-                moe_top_k=2,
-                drop=drop_rate,
-            )
-            module.is_clk_token = True
-            module.is_dist_token = False
-            bound_method = forward_residule_moe_w_attn.__get__(module, module.__class__)
-            setattr(module, "forward", bound_method)
-    return model
 
 
 @register_model
