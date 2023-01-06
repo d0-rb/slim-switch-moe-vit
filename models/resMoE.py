@@ -250,7 +250,6 @@ def forward_residule_vit(self, input_):
         ),
         dim=1,
     )
-
     tokens_fwd = self.drop_path(self.attn(tokens))  # + tokens
 
     sum_idx = -2 if summary_token is not None else -1
@@ -265,8 +264,7 @@ def forward_residule_vit(self, input_):
 
     tokens = tokens_fwd + tokens
 
-    if summary_token is not None:
-        tokens = tokens[:, 0:-1]
+    tokens = tokens[:, 0 : input_.size(1) - skip_tk.size(1)]
 
     if skip_tk is not None and summary_skip_token is not None:
         update_skip_tk = (
