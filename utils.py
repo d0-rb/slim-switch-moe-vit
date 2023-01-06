@@ -9,22 +9,22 @@ Mostly copy-paste from torchvision references.
 """
 import datetime
 import io
-import itertools
 import os
 import time
 from collections import defaultdict
 from collections import deque
 from collections.abc import Sequence
-
 import numpy as np
+import itertools
+
 import tensorboardX
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from timm.data.constants import IMAGENET_DEFAULT_MEAN
-from timm.data.constants import IMAGENET_DEFAULT_STD
 from torchvision import transforms
 from torchvision.utils import make_grid
+from timm.data.constants import IMAGENET_DEFAULT_MEAN
+from timm.data.constants import IMAGENET_DEFAULT_STD
 
 from models.resMoE import Gate
 
@@ -324,19 +324,15 @@ class TensorboardXTracker:
 
     def add_image(self, var_name, img, step):
         self.writer.add_image(var_name, img, step)
-
+    
     def add_tk_skp_vis(self, depth, gate, img, step):
-        self.add_image(f"block_{depth}_{gate}", img, step)
+        self.add_image(f'block_{depth}_{gate}', img, step)
 
     def close(self):
         self.writer.close()
 
 
 class TokenSkipVisualizer:
-    GATE_NAMES = (
-        "dense_gate",
-        "moe_gate",
-    )  # names of gates IN THE ORDER OF WHICH THEY ARE PROCESSED
 
     def __init__(
         self,
@@ -352,7 +348,7 @@ class TokenSkipVisualizer:
 
         if global_rank != 0:
             return
-
+        
         sampler = torch.utils.data.RandomSampler(dataset)
 
         dataloader = torch.utils.data.DataLoader(
@@ -363,52 +359,40 @@ class TokenSkipVisualizer:
             pin_memory=args.pin_mem,
             drop_last=False,
         )
-
-        self.model = model  # .module
+        
+        self.model = model.module if args.distributed else model
 
         negative_mean = [-channel_mean for channel_mean in IMAGENET_DEFAULT_MEAN]
-        inverse_std = [1 / channel_std for channel_std in IMAGENET_DEFAULT_STD]
-        self.unnormalize = transforms.Compose(
-            [
-                transforms.Normalize(mean=[0.0, 0.0, 0.0], std=inverse_std),
-                transforms.Normalize(mean=negative_mean, std=[1.0, 1.0, 1.0]),
-            ]
-        )
-        self.indices = (
-            []
-        )  # will contain index mappings to be composed, should be reset before every visualization
-        self.vis_gates = [
-            gate
-            for gate in itertools.product(
-                range(len(self.model.blocks)), self.GATE_NAMES
-            )
-        ]  # which gates to output visualizations for (all by default)
+        inverse_std = [1/channel_std for channel_std in IMAGENET_DEFAULT_STD]
+        self.unnormalize = transforms.Compose([
+            transforms.Normalize(mean=[0., 0., 0.], std=inverse_std),
+            transforms.Normalize(mean=negative_mean, std=[1., 1., 1.]),
+        ])
+        self.indices = []  # will contain index mappings to be composed, should be reset before every visualization
+        self.vis_gates = [gate for gate in itertools.product(range(len(self.model.blocks)), self.GATE_NAMES)]  # which gates to output visualizations for (all by default)
         self.writer = writer
         self.skip_tk_brightness = skip_tk_brightness
         self.step = 0  # for tensorboard
         self.track_idx = False  # for disabling/enabling vis hooks
-
+        
         images, target = next(iter(dataloader))
 
-        self.display_img = self.unnormalize(
-            images
-        ).cpu()  # original images for reference
+        self.display_img = self.unnormalize(images).cpu()  # original images for reference
 
         self.patch_size = self.model.patch_embed.patch_size
         self.grid_size = self.model.patch_embed.grid_size
 
         self.images = images.to(device, non_blocking=True)
 
-        for depth, block in enumerate(self.model.blocks):
-            for gate_name in self.GATE_NAMES:
-                current_gate = getattr(block, gate_name, None)
 
-                if not isinstance(current_gate, Gate):
-                    print(f"invalid gate {gate_name} at block {depth}")
-                    return
+        for depth, block in enumerate(self.model.blocks):
+            for gate_name, gate in block.named_children():
+                if not isinstance(gate, Gate):
+                    continue
 
                 vis_hook = self._idx_vis_hook(depth, gate_name)
-                current_gate.register_forward_hook(vis_hook)
+                gate.register_forward_hook(vis_hook)
+    
 
     def _idx_vis_hook(self, depth, name):
         gate_tuple = (depth, name)
@@ -418,7 +402,7 @@ class TokenSkipVisualizer:
                 return
 
             self.indices.append(gate.tk_idx.detach().cpu())
-
+            
             if not gate_tuple in self.vis_gates:
                 return
 
@@ -427,46 +411,39 @@ class TokenSkipVisualizer:
 
             # x.shape (B, Tokens, dim)
             B, T, D = x.shape
-
+            
             n = int(x.size(1) * gate.threshold)  # number of selected tokens
 
             # total_idx.shape (B, Tokens) [first n tokens along dim 1 are selected, rest are skip]
-            total_idx = (
-                torch.arange(T, device="cpu").unsqueeze(0).repeat((B, 1))
-            )  # final idx mapping made by composing everything in indexes
+            total_idx = torch.arange(T, device='cpu').unsqueeze(0).repeat((B, 1))  # final idx mapping made by composing everything in indexes
             for index in self.indices:  # composing all index mappings
                 total_idx = torch.gather(total_idx, dim=1, index=index)
 
             sel_idx = total_idx[:, :n]  # indices of selected tokens
             tk_mask = torch.full((B, T), self.skip_tk_brightness, dtype=torch.float)
-            tk_mask.scatter_(
-                dim=1, index=sel_idx, src=torch.ones_like(sel_idx, dtype=torch.float)
-            )  # np equivalent of torch.scatter to go from indices to mask
-
-            tk_mask = tk_mask.view(
-                B, 1, *self.grid_size
-            )  # tk_mask.shape (B, H_patch, W_patch, 1)
-            img_mask = torch.kron(
-                tk_mask, torch.ones((1, 3, *self.patch_size))
-            )  # img_mask.shape (B, 3, H, W)
+            tk_mask.scatter_(dim=1, index=sel_idx, src=torch.ones_like(sel_idx, dtype=torch.float))  # np equivalent of torch.scatter to go from indices to mask
+            
+            tk_mask = tk_mask.view(B, 1, *self.grid_size)  # tk_mask.shape (B, H_patch, W_patch, 1)
+            img_mask = torch.kron(tk_mask, torch.ones((1, 3, *self.patch_size)))  # img_mask.shape (B, 3, H, W)
 
             masked_img = img_mask * self.display_img
             masked_img = make_grid(masked_img)
 
             self.writer.add_tk_skp_vis(depth, name, masked_img, self.step)
-
+            
         return gate_hook
-
+    
     @property
     def track_idx(self):
-        return getattr(self, "_track_idx", False)
-
+        return getattr(self, '_track_idx', False)
+        
     @track_idx.setter
     def track_idx(self, track_idx):
         self._track_idx = track_idx
 
         if track_idx:
             self.indices = []
+
 
     def savefig(self, step, gates: None | Sequence[tuple[int, str]] = None):
         """
@@ -478,18 +455,17 @@ class TokenSkipVisualizer:
 
         if global_rank != 0:
             return
-
+        
         if gates is not None:
             self.vis_gates = gates
-
+        
         self.step = step
         self.track_idx = True
 
         # compute output
-        self.model.eval()
         with torch.no_grad():
             with torch.cuda.amp.autocast():
                 self.model(self.images)
-        self.model.train()
-
+        
         self.track_idx = False
+
