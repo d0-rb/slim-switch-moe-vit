@@ -333,9 +333,6 @@ class TensorboardXTracker:
 
 
 class TokenSkipVisualizer:
-    GATE_NAMES = ('dense_gate', 'moe_gate')  # names of gates IN THE ORDER OF WHICH THEY ARE PROCESSED
-
-
     def __init__(
         self,
         model: nn.Module,
@@ -362,7 +359,7 @@ class TokenSkipVisualizer:
             drop_last=False,
         )
         
-        self.model = model.module
+        self.model = model.module if args.distributed else model
 
         negative_mean = [-channel_mean for channel_mean in IMAGENET_DEFAULT_MEAN]
         inverse_std = [1/channel_std for channel_std in IMAGENET_DEFAULT_STD]
@@ -388,15 +385,12 @@ class TokenSkipVisualizer:
 
 
         for depth, block in enumerate(self.model.blocks):
-            for gate_name in self.GATE_NAMES:
-                current_gate = getattr(block, gate_name, None)
-
-                if not isinstance(current_gate, Gate):
-                    print(f'invalid gate {gate_name} at block {depth}')
-                    return
+            for gate_name, gate in block.named_children():
+                if not isinstance(gate, Gate):
+                    continue
 
                 vis_hook = self._idx_vis_hook(depth, gate_name)
-                current_gate.register_forward_hook(vis_hook)
+                gate.register_forward_hook(vis_hook)
     
 
     def _idx_vis_hook(self, depth, name):
