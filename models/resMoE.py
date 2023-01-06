@@ -215,7 +215,7 @@ def forward_residule_moe_w_attn_loss(self, x):
 
 
 def forward_residule_vit(self, input_):
-    inut_ = self.norm1(input_)
+    input_ = self.norm1(input_)
 
     cls_token: th.Tensor | None = None
     dist_token: th.Tensor | None = None
@@ -257,6 +257,7 @@ def forward_residule_vit(self, input_):
     attn_summary_tk = tokens_fwd[:, sum_idx].unsqueeze(dim=1)
 
     tokens = tokens_fwd + tokens
+    tokens = self.norm2(tokens)
 
     tokens_fwd = self.drop_path(self.mlp(tokens))
 
