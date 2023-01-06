@@ -368,12 +368,12 @@ class TokenSkipVisualizer:
             transforms.Normalize(mean=negative_mean, std=[1., 1., 1.]),
         ])
         self.indices = []  # will contain index mappings to be composed, should be reset before every visualization
-        self.vis_gates = [gate for gate in itertools.product(range(len(self.model.blocks)), self.GATE_NAMES)]  # which gates to output visualizations for (all by default)
+        self.vis_gates = []
         self.writer = writer
         self.skip_tk_brightness = skip_tk_brightness
         self.step = 0  # for tensorboard
         self.track_idx = False  # for disabling/enabling vis hooks
-        
+
         images, target = next(iter(dataloader))
 
         self.display_img = self.unnormalize(images).cpu()  # original images for reference
@@ -389,6 +389,7 @@ class TokenSkipVisualizer:
                 if not isinstance(gate, Gate):
                     continue
 
+                self.vis_gates.append((depth, gate_name))
                 vis_hook = self._idx_vis_hook(depth, gate_name)
                 gate.register_forward_hook(vis_hook)
     
