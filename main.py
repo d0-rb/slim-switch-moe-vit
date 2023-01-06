@@ -424,7 +424,7 @@ def get_args_parser():
 
     parser.add_argument(
         "--gate-lr",
-        default=1e-3,
+        default=1e-4,
         type=float,
         help="set learning for skip gates apart from the rest of our model",
     )
@@ -477,7 +477,7 @@ def main(args):
     dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
 
     # dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
+    # dataset_val, _ = build_dataset(is_train=False, args=args)
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -598,7 +598,7 @@ def main(args):
 
     model_ema = None
     if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        # meanportant to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
@@ -722,8 +722,20 @@ def main(args):
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
         lr_scheduler.step(args.start_epoch)
+
+    vis = utils.TokenSkipVisualizer(
+        model=model,
+        device=device,
+        dataset=dataset_val,
+        num_samples=8,
+        writer=writer,
+        args=args,
+        skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
+    )
     
     last_task_end = 0
+    start_time = time.time()
+    max_accuracy = 0.0
 
     for task_idx in range(args.num_tasks):
         optimizer = create_optimizer(
@@ -800,25 +812,21 @@ def main(args):
             )
             return
 
-        print(f"Starting task {task_idx + 1}/{args.num_tasks}, learning {current_task_nb_classes} classes ({last_task_end}:{current_task_end}) for {args.epochs} epochs")
-
-        start_time = time.time()
-        max_accuracy = 0.0
-
         delta: typ.Dict[str, typ.Tuple[float, int]] = {}
         offset = args.gate_epoch_offset
-        i = 0
+        # i = 0
         for name, module in model.named_modules():
             if isinstance(module, (Gate)):
                 delta[name] = (
-                    (module._threshold - module.threshold)
-                    / (args.epochs - args.warmup_epochs - offset * i),
-                    i * offset + args.warmup_epochs,
+                    (module._threshold - module.threshold) / (args.epochs - offset),
+                    offset,
                 )
-                i += 1
-                module.disable = True
+                # i += 1
+        # module.disable = True
         # print(delta)
 
+        print(f"Starting task {task_idx + 1}/{args.num_tasks}, learning {current_task_nb_classes} classes ({last_task_end}:{current_task_end}) for {args.epochs} epochs")
+        
         for epoch in range(task_idx * args.epochs, (task_idx + 1) * args.epochs):
             if args.distributed:
                 data_loader_train.sampler.set_epoch(epoch)
@@ -881,9 +889,11 @@ def main(args):
                     model_ema.update(model)
                 
                 print(f'Rehearsal:  lr: {optimizer.param_groups[0]["lr"]}  loss: {loss_value}')
-                
 
             lr_scheduler.step(epoch)
+            writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+            writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
+
             for name, module in model.named_modules():
                 if name in delta and epoch >= delta[name][-1]:
                     module.disable = False
@@ -905,8 +915,24 @@ def main(args):
                         },
                         checkpoint_path,
                     )
+            vis.savefig(epoch)
 
             test_stats = evaluate(data_loader_val, model, device)
+
+            writer.log_scalar(
+                "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+            )
+
+            for name, module in model.named_modules():
+                if name in delta and epoch >= delta[name][-1]:
+                    # module.disable = False
+                    module.step(delta[name][0])
+                    torch.cuda.reset_peak_memory_stats()
+                    # print(f"{name=} {module._threshold}")
+                    writer.log_scalar(
+                        f"threshold/{name}", module._threshold - delta[name][0], epoch
+                    )
+
             print(
                 f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
             )
@@ -915,10 +941,12 @@ def main(args):
                 f"Accuracy of the network on the {len(task_dataset_val)} test images for this task: {task_test_stats['acc1']:.1f}%"
             )
 
+            writer.log_scalar("train/loss", train_stats["loss"], epoch)
+            writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+            writer.log_scalar(f"test/task{task_idx}_acc1", task_test_stats["acc1"], epoch)
 
-            writer.log_test_acc(task_test_stats["acc1"], epoch)
-            writer.log_test_acc(test_stats["acc1"], epoch)
-            writer.log_loss(train_stats["loss"], epoch)
+            if "loss_attn" in train_stats:
+                writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
 
             if max_accuracy < test_stats["acc1"]:
                 # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
@@ -940,15 +968,16 @@ def main(args):
                         )
 
             print(f"Max accuracy: {max_accuracy:.2f}%")
-            writer.log_scalar("max_acc", max_accuracy, epoch)
+            # writer.log_scalar("max_acc", max_accuracy, epoch)
+            writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
-            # for name, m in model.named_modules():
-            # if isinstance(m, (Gate)):
-            # pass_perc = m._skipped_tokens / m._total_tokens
-            # writer.log_scalar(name, pass_perc, epoch)
-            # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
-            # m._skipped_tokens = 0.0
-            # m._total_tokens = 0.0
+            for name, m in model.named_modules():
+                if isinstance(m, (Gate)):
+                    skip_ratio = m._skipped_tokens / m._total_tokens
+                    writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
+                    # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
+                    m._skipped_tokens = 0.0
+                    m._total_tokens = 0.0
 
             log_stats = {
                 **{f"train_{k}": v for k, v in train_stats.items()},
