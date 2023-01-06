@@ -718,7 +718,7 @@ def main(args):
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )
         return
-    
+
     vis = utils.TokenSkipVisualizer(
         model=model,
         device=device,
@@ -828,8 +828,7 @@ def main(args):
                         },
                         checkpoint_path,
                     )
-                
-                vis.savefig(epoch)
+            vis.savefig(epoch)
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
         # writer.log_scalar("max_acc", max_accuracy, epoch)

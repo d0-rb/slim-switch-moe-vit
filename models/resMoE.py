@@ -168,7 +168,7 @@ def forward_residule_moe(self, x):
         x,
         self.dense_gate,
         lambda x: self.drop_path(self.attn(x)),
-        self.is_clk_token,
+        self.is_cls_token,
         self.is_dist_token,
     )
     x = self.norm2(x)
@@ -176,7 +176,7 @@ def forward_residule_moe(self, x):
         x,
         self.moe_gate,
         lambda x: self.drop_path(self.mlp(x)),
-        self.is_clk_token,
+        self.is_cls_token,
         self.is_dist_token,
     )
     return x
@@ -188,7 +188,7 @@ def forward_residule_moe_w_attn_loss(self, x):
         x,
         self.dense_gate,
         lambda x: self.drop_path(self.attn(x)),
-        self.is_clk_token,
+        self.is_cls_token,
         self.is_dist_token,
     )
 
@@ -208,29 +208,81 @@ def forward_residule_moe_w_attn_loss(self, x):
         x,
         self.moe_gate,
         lambda x: self.drop_path(self.mlp(x)),
-        self.is_clk_token,
+        self.is_cls_token,
         self.is_dist_token,
     )
     return x
 
 
-def forward_residule_vit(self, x):
-    def fwd_fn(x):
-        x = self.drop_path(self.attn(x))
-        x = self.norm2(x)
-        x = self.drop_path(self.mlp(x))
-        return x
+def forward_residule_vit(self, input_):
+    inut_ = self.norm1(input_)
 
-    x = self.norm1(x)
+    cls_token: th.Tensor | None = None
+    dist_token: th.Tensor | None = None
+    skip_tk: th.Tensor | None = None
+    summary_token: th.Tensor | None = None
+    summary_skip_token: th.Tensor | None = None
 
-    x = mask_and_forward(
-        x,
-        self.dense_gate,
-        self.fwd_fn,
-        self.is_clk_token,
-        self.is_dist_token,
+    patch_tk: th.Tensor
+    tokens: th.Tensor
+
+    patch_idx = 0
+
+    if self.is_cls_token:
+        cls_token = input_[:, 0].unsqueeze(dim=1)
+        patch_idx += 1
+    if self.is_dist_token:
+        dist_token = input_[:, 1].unsqueeze(dim=1)
+        patch_idx += 1
+
+    patch_tk = input_[:, patch_idx::]
+
+    tokens, skip_tk, summary_token, summary_skip_token = self.dense_gate(
+        patch_tk
+    )  # , 1::])
+
+    tokens = th.cat(
+        list(
+            filter(
+                lambda x: x is not None,  # type: ignore[arg-type]
+                [cls_token, dist_token, tokens, summary_skip_token, summary_token],
+            )
+        ),
+        dim=1,
     )
-    return x
+
+    tokens_fwd = self.drop_path(self.attn(tokens))  # + tokens
+
+    sum_idx = -2 if summary_token is not None else -1
+
+    attn_summary_tk = tokens_fwd[:, sum_idx].unsqueeze(dim=1)
+
+    tokens = tokens_fwd + tokens
+
+    tokens_fwd = self.drop_path(self.mlp(tokens))
+
+    mlp_summary_tk = tokens_fwd[:, sum_idx].unsqueeze(dim=1)
+
+    tokens = tokens_fwd + tokens
+
+    if summary_token is not None:
+        tokens = tokens[:, 0:-1]
+
+    if skip_tk is not None and summary_skip_token is not None:
+        update_skip_tk = (
+            skip_tk
+            + attn_summary_tk.tile(skip_tk.size(1)).view(skip_tk.shape)
+            + mlp_summary_tk.tile(skip_tk.size(1)).view(skip_tk.shape)
+        )
+        tokens = th.cat((tokens, update_skip_tk), dim=1)
+
+    cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
+    loss = cls_attn[:, -2] - cls_attn[:, -1]  # skip_sum - non_skip_sum
+    loss = loss[loss > 0].mean()
+    if th.isnan(loss):
+        loss = th.tensor(0).to(input_.device)
+    self.attn_loss = loss
+    return tokens
 
 
 def mask_and_forward(
@@ -328,7 +380,7 @@ def resmoe_tiny_patch16_224_expert8_attn_loss(
                 moe_top_k=2,
                 drop=drop_rate,
             )
-            module.is_clk_token = True
+            module.is_cls_token = True
             module.is_dist_token = False
             bound_method = forward_residule_moe_w_attn_loss.__get__(
                 module, module.__class__
@@ -371,7 +423,7 @@ def resmoe_tiny_distilled_patch16_224_expert8(
                 moe_top_k=2,
                 drop=drop_rate,
             )
-            module.is_clk_token = True
+            module.is_cls_token = True
             module.is_dist_token = True
             bound_method = forward_residule_moe.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
@@ -412,7 +464,7 @@ def resmoe_tiny_patch16_224_expert8(
                 moe_top_k=2,
                 drop=drop_rate,
             )
-            module.is_clk_token = True
+            module.is_cls_token = True
             module.is_dist_token = False
             bound_method = forward_residule_moe.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
@@ -461,7 +513,7 @@ def resvit_tiny_patch16_224(
                 starting_threshold=starting_threshold,
                 target_threshold=target_threshold,
             )
-            module.is_clk_token = True
+            module.is_cls_token = True
             module.is_dist_token = False
             bound_method = forward_residule_vit.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
