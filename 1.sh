@@ -1,6 +1,6 @@
 #!/bin/bash
 
-model=resmoe_tiny_patch16_224_expert8_attn_loss
+model=moe_tiny_patch16_224_expert8
 CUDA=0
 SEED=0
 START_THRESHOLD=0.9

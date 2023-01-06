@@ -416,7 +416,7 @@ class TokenSkipVisualizer:
             # x.shape (B, Tokens, dim)
             B, T, D = x.shape
 
-            n = int(x.size(1) * gate.threshold)  # number of selected tokens
+            n = int(x.size(1) * gate._threshold)  # number of selected tokens
 
             # total_idx.shape (B, Tokens) [first n tokens along dim 1 are selected, rest are skip]
             total_idx = (
