@@ -404,15 +404,42 @@ def get_args_parser():
         "--dist_url", default="env://", help="url used to set up distributed training"
     )
 
-    # token skipping parameters
     parser.add_argument(
         "--starting-threshold",
-        default=1.0,
+        default=None,
         type=float,
         help="starting token skip threshold (for both attn and moe gates)",
     )
     parser.add_argument(
         "--target-threshold",
+        default=None,
+        type=float,
+        help="target token skip threshold (for both attn and moe gates)",
+    )
+
+    # token skipping parameters
+    parser.add_argument(
+        "--starting-threshold-moe",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for both attn and moe gates)",
+    )
+    parser.add_argument(
+        "--target-threshold-moe",
+        default=0.9,
+        type=float,
+        help="target token skip threshold (for both attn and moe gates)",
+    )
+
+    # token skipping parameters
+    parser.add_argument(
+        "--starting-threshold-dense",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for both attn and moe gates)",
+    )
+    parser.add_argument(
+        "--target-threshold-dense",
         default=0.9,
         type=float,
         help="target token skip threshold (for both attn and moe gates)",
@@ -527,8 +554,10 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         img_size=args.input_size,
-        starting_threshold=args.starting_threshold,
-        target_threshold=args.target_threshold,
+        starting_threshold_dense=args.starting_threshold_dense,
+        target_threshold_dense=args.target_threshold_dense,
+        starting_threshold_moe=args.starting_threshold_moe,
+        target_threshold_moe=args.target_threshold_moe,
     )
 
     if args.finetune:
@@ -864,6 +893,12 @@ if __name__ == "__main__":
         "DeiT training and evaluation script", parents=[get_args_parser()]
     )
     args = parser.parse_args()
+    if (args.starting_threshold is not None) and (args.target_threshol is not None):
+        args.starting_threshold_dense = args.starting_threshold
+        args.target_threshold_dense = args.target_threshold
+        args.starting_threshold_moe = args.starting_threshold
+        args.target_threshold_moe = args.target_threshold
+
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
