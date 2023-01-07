@@ -893,7 +893,7 @@ if __name__ == "__main__":
         "DeiT training and evaluation script", parents=[get_args_parser()]
     )
     args = parser.parse_args()
-    if (args.starting_threshold is not None) and (args.target_threshol is not None):
+    if (args.starting_threshold is not None) and (args.target_threshold is not None):
         args.starting_threshold_dense = args.starting_threshold
         args.target_threshold_dense = args.target_threshold
         args.starting_threshold_moe = args.starting_threshold

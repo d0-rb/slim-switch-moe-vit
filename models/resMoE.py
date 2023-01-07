@@ -458,7 +458,7 @@ def resmoe_tiny_patch16_224_expert8_attn_loss(
 
 
 @register_model
-def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm(
+def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm1(
         pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, starting_threshold_moe=1.0,
         target_threshold_moe=0.9, **kwargs
 ):
@@ -506,7 +506,7 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm(
 
 
 @register_model
-def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm_dropout(
+def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm1_dropout(
     pretrained=False, starting_threshold=1.0, target_threshold=0.9, **kwargs
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
@@ -714,7 +714,7 @@ def resvit_tiny_patch16_224_nonorm(
 
 @register_model
 def resvit_tiny_patch16_224_postnorm(
-    pretrained=False, starting_threshold=1.0, target_threshold=0.9, **kwargs
+    pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, **kwargs
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -729,8 +729,8 @@ def resvit_tiny_patch16_224_postnorm(
             module.dense_gate = Gate(
                 embed_dim,
                 1.0,
-                starting_threshold=starting_threshold,
-                target_threshold=target_threshold,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
             )
             module.is_cls_token = True
             module.is_dist_token = False

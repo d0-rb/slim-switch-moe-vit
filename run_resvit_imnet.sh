@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=$cuda python3 -m torch.distributed.launch --nproc_per_node=
                 --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --warmup-epochs 5 --drop 0.0 \
                 --seed $n --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \
                 --unscale-lr --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
-                --starting-threshold $start_threshold --target-threshold $target_threshold \
+                --starting-threshold-dense $start_threshold --target-threshold-dense $target_threshold \
                 --output_dir imnet-models/$model/scratch_${start_threshold}_${target_threshold}_${lr}/$n \
                 # --num-tasks $num_tasks \
                 # --rehearsal --rehearsal-batch-size 512 \
