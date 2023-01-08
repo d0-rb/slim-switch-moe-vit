@@ -3,7 +3,11 @@ read -p 'model: ' model #="deit_tiny_patch16_224"
 # model="resmoe_tiny_patch16_224_expert8"
 # model="moe_tiny_patch16_224_expert8"
 read -p 'cuda: ' cuda
-read -p 'num_cuda: ' num_cuda
+
+num_comma=`echo ${cuda} | tr -cd , | wc -c`
+num_cuda=$((${NB_COMMA} + 1))
+port=$((9000 + RANDOM % 1000))
+
 read -p 'seed: ' n #=0
 read -p 'lr: ' lr #=0
 # read -p 'starting threshold: ' start_threshold
@@ -11,7 +15,7 @@ read -p 'lr: ' lr #=0
 start_threshold="0.8"
 target_threshold="0.8"
 
-CUDA_VISIBLE_DEVICES=$cuda python3 -m torch.distributed.launch --nproc_per_node=$num_cuda --master_port=2322 --use_env main.py --model $model --data-set CIFAR10 \
+CUDA_VISIBLE_DEVICES=$cuda python3 -m torch.distributed.launch --nproc_per_node=$num_cuda --master_port=$port --use_env main.py --model $model --data-set CIFAR10 \
                 --data-path ./dataset --batch 128 \
                 --lr $lr --epochs 400 --weight-decay 0.05 --sched cosine --input-size 224 \
                 --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --warmup-epochs 5 --drop 0.0 \

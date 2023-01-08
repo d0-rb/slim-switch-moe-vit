@@ -306,31 +306,49 @@ def init_distributed_mode(args):
     setup_for_distributed(args.rank == 0)
 
 
+def ddp_skip(func):
+	def wrapper(*args, **kwargs):
+		if get_world_size() > 1 and get_rank() > 0:
+			return
+		else:
+			return func(*args, **kwargs)
+	return wrapper
+
+
 class TensorboardXTracker:
+    @ddp_skip
     def __init__(self, log_dir):
         self.writer = tensorboardX.SummaryWriter(log_dir)
-
+    
+    @ddp_skip
     def log_scalar(self, var_name, value, step):
         self.writer.add_scalar(var_name, value, step)
-
+    
+    @ddp_skip
     def log_loss(self, loss, step):
         self.log_scalar("loss", loss, step)
 
+    @ddp_skip
     def log_validation_acc(self, acc, step):
         self.log_scalar("validation_acc", acc, step)
 
+    @ddp_skip
     def log_test_acc(self, acc, step):
         self.log_scalar("test_acc", acc, step)
 
+    @ddp_skip
     def log_task_test_acc(self, acc, step):
         self.log_scalar("task_test_acc", acc, step)
     
+    @ddp_skip
     def add_image(self, var_name, img, step):
         self.writer.add_image(var_name, img, step)
 
+    @ddp_skip
     def add_tk_skp_vis(self, depth, gate, img, step):
         self.add_image(f"block_{depth}_{gate}", img, step)
 
+    @ddp_skip
     def close(self):
         self.writer.close()
 

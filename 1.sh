@@ -3,8 +3,10 @@
 model=resmoe_tiny_patch16_224_expert8_attn_loss
 CUDA=0
 SEED=0
-START_THRESHOLD=0.9
-TARGET_THRESHOLD=0.5
+START_THRESHOLD_DENSE=0.9
+TARGET_THRESHOLD_DENSE=0.5
+START_THRESHOLD_MOE=0.9
+TARGET_THRESHOLD_MOE=0.5
 LR=2e-4
 EPOCH=400
 
@@ -13,6 +15,7 @@ CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model $model --data-set CIFAR10 --
                 --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --drop 0.0 \
                 --seed ${SEED} --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \
                 --unscale-lr --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
-                --starting-threshold ${START_THRESHOLD} --target-threshold ${TARGET_THRESHOLD} \
-                --output_dir logs/cifar10/$model/scratch/lr_${LR}_ep_${EPOCH}/thres_${START_THRESHOLD}_${TARGET_THRESHOLD}/${SEED} \
+                --starting-threshold-dense ${START_THRESHOLD_DENSE} --target-threshold-dense ${TARGET_THRESHOLD_DENSE} \
+                --starting-threshold-moe ${START_THRESHOLD_MOE} --target-threshold-moe ${TARGET_THRESHOLD_MOE} \
+                --output_dir logs/cifar10/$model/scratch/lr_${LR}_ep_${EPOCH}/dense_${START_THRESHOLD_DENSE}_${TARGET_THRESHOLD_DENSE}/moe_${START_THRESHOLD_MOE}_${TARGET_THRESHOLD_MOE}/${SEED} \
                 --warmup-epochs 5 --gate-lr ${LR}
