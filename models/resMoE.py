@@ -266,7 +266,8 @@ def forward_residule_vit(self, input_):
 
     tokens = tokens_fwd + tokens
 
-    tokens = tokens[:, 0 : input_.size(1) - skip_tk.size(1)]
+    num_skip_tk = 0 if skip_tk is None else skip_tk.size(1)
+    tokens = tokens[:, 0 : input_.size(1) - num_skip_tk]
 
     if skip_tk is not None and summary_skip_token is not None:
         update_skip_tk = (
