@@ -106,6 +106,34 @@ parser.add_argument('--drop_path', type=float, default=None, metavar='PCT',
 parser.add_argument('--drop_block', type=float, default=None, metavar='PCT',
                     help='Drop block rate (default: None)')
 
+# token skipping parameters
+parser.add_argument(
+    "--starting-threshold-moe",
+    default=1.0,
+    type=float,
+    help="starting token skip threshold (for both attn and moe gates)",
+)
+parser.add_argument(
+    "--target-threshold-moe",
+    default=0.9,
+    type=float,
+    help="target token skip threshold (for both attn and moe gates)",
+)
+
+# token skipping parameters
+parser.add_argument(
+    "--starting-threshold-dense",
+    default=1.0,
+    type=float,
+    help="starting token skip threshold (for both attn and moe gates)",
+)
+parser.add_argument(
+    "--target-threshold-dense",
+    default=0.9,
+    type=float,
+    help="target token skip threshold (for both attn and moe gates)",
+)
+
 
 def timestamp(sync=False):
     return time.perf_counter()
@@ -148,7 +176,9 @@ class BenchmarkRunner:
         self.channels_last = kwargs.pop('channels_last', False)
         self.amp_autocast = torch.cuda.amp.autocast if self.use_amp else suppress
 
-        self.model = models.resmoe_tiny_patch16_224_expert8_attn_loss()
+        self.model = models.resmoe_tiny_patch16_224_expert8_attn_loss
+        self.model_name = self.model.__name__
+        self.model = self.model(kwargs)
         self.model.to(
             device=self.device,
             dtype=self.model_dtype,
