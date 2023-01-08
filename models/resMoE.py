@@ -192,12 +192,13 @@ def forward_residule_moe_w_attn_loss(self, x):
         self.is_dist_token,
     )
 
-    cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
-    loss = cls_attn[:, -2] - cls_attn[:, -1]  # skip_sum - non_skip_sum
-    loss = loss[loss > 0].mean()
-    if th.isnan(loss):
-        loss = th.tensor(0).to(x.device)
-    self.attn_loss = loss
+    if hasattr(self.attn, "x_cls_attn"):
+        cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
+        loss = cls_attn[:, -2] - cls_attn[:, -1]  # skip_sum - non_skip_sum
+        loss = loss[loss > 0].mean()
+        if th.isnan(loss):
+            loss = th.tensor(0).to(x.device)
+        self.attn_loss = loss
 
     # self.attn_loss = max(
     # (self.attn.x_cls_attn[:, :, -2] - self.attn.x_cls_attn[:, :, -1]).sum(),
@@ -275,12 +276,13 @@ def forward_residule_vit(self, input_):
         )
         tokens = th.cat((tokens, update_skip_tk), dim=1)
 
-    cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
-    loss = cls_attn[:, -2] - cls_attn[:, -1]  # skip_sum - non_skip_sum
-    loss = loss[loss > 0].mean()
-    if th.isnan(loss):
-        loss = th.tensor(0).to(input_.device)
-    self.attn_loss = loss
+    if hasattr(self.attn, "x_cls_attn"):
+        cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
+        loss = cls_attn[:, -2] - cls_attn[:, -1]  # skip_sum - non_skip_sum
+        loss = loss[loss > 0].mean()
+        if th.isnan(loss):
+            loss = th.tensor(0).to(x.device)
+        self.attn_loss = loss
     return tokens
 
 
@@ -414,7 +416,12 @@ from .model import deit_tiny_distilled_patch16_224
 
 @register_model
 def resmoe_tiny_patch16_224_expert8_attn_loss(
-    pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, starting_threshold_moe=1.0, target_threshold_moe=0.9, **kwargs
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -459,8 +466,12 @@ def resmoe_tiny_patch16_224_expert8_attn_loss(
 
 @register_model
 def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm1(
-        pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, starting_threshold_moe=1.0,
-        target_threshold_moe=0.9, **kwargs
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -552,8 +563,12 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm1_dropout(
 
 @register_model
 def resmoe_tiny_distilled_patch16_224_expert8(
-        pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, starting_threshold_moe=1.0,
-        target_threshold_moe=0.9, **kwargs
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
 ):
     model = deit_tiny_distilled_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -594,8 +609,12 @@ def resmoe_tiny_distilled_patch16_224_expert8(
 
 @register_model
 def resmoe_tiny_patch16_224_expert8(
-        pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, starting_threshold_moe=1.0,
-        target_threshold_moe=0.9, **kwargs
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -658,7 +677,7 @@ def moe_tiny_patch16_224_expert8(pretrained=False, **kwargs):
 
 @register_model
 def resvit_tiny_patch16_224(
-        pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, **kwargs
+    pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, **kwargs
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -685,7 +704,7 @@ def resvit_tiny_patch16_224(
 
 @register_model
 def resvit_tiny_patch16_224_nonorm(
-        pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, **kwargs
+    pretrained=False, starting_threshold_dense=1.0, target_threshold_dense=0.9, **kwargs
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
     patch_size = 16
@@ -734,6 +753,8 @@ def resvit_tiny_patch16_224_postnorm(
             )
             module.is_cls_token = True
             module.is_dist_token = False
-            bound_method = forward_residule_postnorm_vit.__get__(module, module.__class__)
+            bound_method = forward_residule_postnorm_vit.__get__(
+                module, module.__class__
+            )
             setattr(module, "forward", bound_method)
     return model
