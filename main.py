@@ -404,15 +404,42 @@ def get_args_parser():
         "--dist_url", default="env://", help="url used to set up distributed training"
     )
 
-    # token skipping parameters
     parser.add_argument(
         "--starting-threshold",
-        default=1.0,
+        default=None,
         type=float,
         help="starting token skip threshold (for both attn and moe gates)",
     )
     parser.add_argument(
         "--target-threshold",
+        default=None,
+        type=float,
+        help="target token skip threshold (for both attn and moe gates)",
+    )
+
+    # token skipping parameters
+    parser.add_argument(
+        "--starting-threshold-moe",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for both attn and moe gates)",
+    )
+    parser.add_argument(
+        "--target-threshold-moe",
+        default=0.9,
+        type=float,
+        help="target token skip threshold (for both attn and moe gates)",
+    )
+
+    # token skipping parameters
+    parser.add_argument(
+        "--starting-threshold-dense",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for both attn and moe gates)",
+    )
+    parser.add_argument(
+        "--target-threshold-dense",
         default=0.9,
         type=float,
         help="target token skip threshold (for both attn and moe gates)",
@@ -527,8 +554,10 @@ def main(args):
         drop_path_rate=args.drop_path,
         drop_block_rate=None,
         img_size=args.input_size,
-        starting_threshold=args.starting_threshold,
-        target_threshold=args.target_threshold,
+        starting_threshold_dense=args.starting_threshold_dense,
+        target_threshold_dense=args.target_threshold_dense,
+        starting_threshold_moe=args.starting_threshold_moe,
+        target_threshold_moe=args.target_threshold_moe,
     )
 
     if args.finetune:
@@ -719,6 +748,16 @@ def main(args):
         )
         return
 
+    vis = utils.TokenSkipVisualizer(
+        model=model,
+        device=device,
+        dataset=dataset_val,
+        num_samples=8,
+        writer=writer,
+        args=args,
+        skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
+    )
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
@@ -729,9 +768,9 @@ def main(args):
     for name, module in model.named_modules():
         if isinstance(module, (Gate)):
             delta[name] = (
-            (module._threshold - module.threshold)
-            / (args.epochs - offset),
-            offset,)
+                (module._threshold - module.threshold) / (args.epochs - offset),
+                offset,
+            )
             # i += 1
     # module.disable = True
     # print(delta)
@@ -755,8 +794,8 @@ def main(args):
         )
 
         lr_scheduler.step(epoch)
-        writer.log_scalar("train/lr/all", optimizer.param_groups[0]['lr'], epoch)
-        writer.log_scalar("train/lr/gate", optimizer.param_groups[1]['lr'], epoch)
+        writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+        writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
 
         if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]
@@ -776,22 +815,29 @@ def main(args):
 
         test_stats = evaluate(data_loader_val, model, device)
 
+        writer.log_scalar(
+            "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+        )
+
         for name, module in model.named_modules():
             if name in delta and epoch >= delta[name][-1]:
                 # module.disable = False
                 module.step(delta[name][0])
+                torch.cuda.reset_peak_memory_stats()
                 # print(f"{name=} {module._threshold}")
-                writer.log_scalar(f"threshold/{name}", module._threshold - delta[name][0], epoch)
+                writer.log_scalar(
+                    f"threshold/{name}", module._threshold - delta[name][0], epoch
+                )
 
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )
 
-        # writer.log_test_acc(test_stats["acc1"], epoch)
-        # writer.log_loss(train_stats["loss"], epoch)
-
         writer.log_scalar("train/loss", train_stats["loss"], epoch)
         writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+
+        if "loss_attn" in train_stats:
+            writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
 
         if max_accuracy < test_stats["acc1"]:
             # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
@@ -811,11 +857,11 @@ def main(args):
                         },
                         checkpoint_path,
                     )
+            vis.savefig(epoch)
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
         # writer.log_scalar("max_acc", max_accuracy, epoch)
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
-
 
         for name, m in model.named_modules():
             if isinstance(m, (Gate)):
@@ -847,6 +893,12 @@ if __name__ == "__main__":
         "DeiT training and evaluation script", parents=[get_args_parser()]
     )
     args = parser.parse_args()
+    if (args.starting_threshold is not None) and (args.target_threshold is not None):
+        args.starting_threshold_dense = args.starting_threshold
+        args.target_threshold_dense = args.target_threshold
+        args.starting_threshold_moe = args.starting_threshold
+        args.target_threshold_moe = args.target_threshold
+
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
