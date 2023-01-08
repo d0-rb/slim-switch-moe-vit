@@ -177,13 +177,18 @@ class BenchmarkRunner:
         self.amp_autocast = torch.cuda.amp.autocast if self.use_amp else suppress
 
         self.model = models.resmoe_tiny_patch16_224_expert8_attn_loss
+        # self.model = models.resvit_tiny_patch16_224
         self.model_name = self.model.__name__
         self.model = self.model(kwargs)
 
         for name, module in self.model.named_modules():
             if isinstance(module, models.Block):
+                print(f'dense_gate._threshold: {module.dense_gate._threshold}')
                 module.dense_gate._threshold = torch.tensor(kwargs['target_threshold_dense'])
-                module.dense_gate._threshold = torch.tensor(kwargs['target_threshold_moe'])
+                moe_gate = getattr(module, 'moe_gate', None)
+                if moe_gate:
+                    print(f'moe_gate._threshold: {moe_gate._threshold}')
+                    moe_gate._threshold = torch.tensor(kwargs['target_threshold_moe'])
         
         self.model.to(
             device=self.device,

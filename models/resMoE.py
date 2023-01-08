@@ -12,7 +12,7 @@ from torch.autograd import Variable
 from .model import DistilledVisionTransformer as Deit
 from .vision_transformer import Block
 
-__all__ = ["Gate", "ResBlock", "resmoe_tiny_patch16_224_expert8", "resmoe_tiny_patch16_224_expert8_attn_loss", "Block"]
+__all__ = ["Gate", "ResBlock", "resmoe_tiny_patch16_224_expert8", "resmoe_tiny_patch16_224_expert8_attn_loss", "Block", "resvit_tiny_patch16_224"]
 
 
 def sampler(tensor, tau, temperature):
