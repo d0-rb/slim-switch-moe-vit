@@ -3,25 +3,25 @@
 #######################
 
 # Model definition
-model: convit
-embed_dim: 384
-depth: 6
-num_heads: 12
-patch_size: 4
-input_size: 32
+model: resmoe_tiny_patch16_224_expert8_attn_loss_convit
+drop: 0.0
+input_size: 224
+starting_threshold_dense: 0.9
+target_threshold_dense: 0.5
+starting_threshold_moe: 0.9
+target_threshold_moe: 0.5
 local_up_to_layer: 5
 class_attention: true
 
 # Training setting
 no_amp: true
 eval_every: 50
-epochs: 300
 
 # Base hyperparameter
 weight_decay: 0.000001
-batch_size: 128
-incremental_batch_size: 128
-incremental_lr: 0.0005
+batch_size: 256
+incremental_batch_size: 256
+incremental_lr: 0.0002
 rehearsal: icarl_all
 
 # Knowledge Distillation

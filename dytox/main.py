@@ -321,6 +321,36 @@ def get_args_parser():
     parser.add_argument('--validation', default=0.0, type=float,
                         help='Use % of the training set as val, replacing the test.')
 
+    # ResMoE
+
+    # token skipping parameters
+    parser.add_argument(
+        "--starting-threshold-moe",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for moe gates)",
+    )
+    parser.add_argument(
+        "--target-threshold-moe",
+        default=0.9,
+        type=float,
+        help="target token skip threshold (for moe gates)",
+    )
+
+    # token skipping parameters
+    parser.add_argument(
+        "--starting-threshold-dense",
+        default=1.0,
+        type=float,
+        help="starting token skip threshold (for attn gates)",
+    )
+    parser.add_argument(
+        "--target-threshold-dense",
+        default=0.9,
+        type=float,
+        help="target token skip threshold (for attn gates)",
+    )
+
     return parser
 
 

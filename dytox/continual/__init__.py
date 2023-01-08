@@ -10,3 +10,4 @@ from continual import sam
 from continual import samplers
 from continual import mixup
 from continual import pod
+from continual import resmoeconvit

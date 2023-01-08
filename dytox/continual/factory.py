@@ -1,6 +1,6 @@
 import torch
 
-from continual import convit, dytox, samplers, vit
+from continual import convit, dytox, samplers, vit, 
 from continual.cnn import (InceptionV3, resnet18, resnet34, resnet50,
                            resnext50_32x4d, seresnet18, vgg16, vgg16_bn,
                            wide_resnet50_2, resnet18_scs, resnet18_scs_max, resnet18_scs_avg, resnet_rebuffi)
@@ -48,6 +48,21 @@ def get_backbone(args):
     elif args.model == 'vgg16bn': model = vgg16_bn()
     elif args.model == 'vgg16': model = vgg16()
     elif args.model == 'rebuffi': model = resnet_rebuffi()
+    elif args.model == 'resmoe_tiny_patch16_224_expert8_attn_loss':
+        model = resmoe_tiny_patch16_224_expert8_attn_loss(
+            starting_threshold_dense=args.starting_threshold_dense,
+            target_threshold_dense=args.target_threshold_dense,
+            starting_threshold_moe=args.starting_threshold_moe,
+            target_threshold_moe=args.target_threshold_moe,
+            num_classes=args.nb_classes,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            img_size=args.input_size,
+            local_up_to_layer=args.local_up_to_layer,
+            locality_strength=args.locality_strength,
+            class_attention=args.class_attention,
+            ca_type='jointca' if args.joint_tokens else 'base',
+        )
     else:
         raise NotImplementedError(f'Unknown backbone {args.model}')
 
