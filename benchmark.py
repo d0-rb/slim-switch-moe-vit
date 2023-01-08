@@ -179,6 +179,12 @@ class BenchmarkRunner:
         self.model = models.resmoe_tiny_patch16_224_expert8_attn_loss
         self.model_name = self.model.__name__
         self.model = self.model(kwargs)
+
+        for name, module in self.model.named_modules():
+            if isinstance(module, models.Block):
+                module.dense_gate._threshold = torch.tensor(kwargs['target_threshold_dense'])
+                module.dense_gate._threshold = torch.tensor(kwargs['target_threshold_moe'])
+        
         self.model.to(
             device=self.device,
             dtype=self.model_dtype,
