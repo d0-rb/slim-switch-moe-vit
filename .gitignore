@@ -16,3 +16,5 @@ dist
 dataset/*
 *-models/
 *-models/
+imagenet
+.mypy_cache/*
