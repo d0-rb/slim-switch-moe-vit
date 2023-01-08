@@ -62,7 +62,7 @@ parser.add_argument('--model', '-m', metavar='NAME', default='resnet50',
                     help='model architecture (default: resnet50)')
 parser.add_argument('-b', '--batch_size', default=256, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
-parser.add_argument('--img_size', default=None, type=int,
+parser.add_argument('--img_size', default=224, type=int,
                     metavar='N', help='Input image dimension, uses model default if empty')
 parser.add_argument('--input_size', default=None, nargs=3, type=int,
                     metavar='N N N',
@@ -179,16 +179,7 @@ class BenchmarkRunner:
         self.model = models.resmoe_tiny_patch16_224_expert8_attn_loss
         # self.model = models.resvit_tiny_patch16_224
         self.model_name = self.model.__name__
-        self.model = self.model(kwargs)
-
-        for name, module in self.model.named_modules():
-            if isinstance(module, models.Block):
-                print(f'dense_gate._threshold: {module.dense_gate._threshold}')
-                module.dense_gate._threshold = torch.tensor(kwargs['target_threshold_dense'])
-                moe_gate = getattr(module, 'moe_gate', None)
-                if moe_gate:
-                    print(f'moe_gate._threshold: {moe_gate._threshold}')
-                    moe_gate._threshold = torch.tensor(kwargs['target_threshold_moe'])
+        self.model = self.model(**kwargs)
         
         self.model.to(
             device=self.device,
