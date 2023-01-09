@@ -12,7 +12,7 @@ from torch.autograd import Variable
 from .model import DistilledVisionTransformer as Deit
 from .vision_transformer import Block
 
-__all__ = ["Gate", "ResBlock", "resmoe_tiny_patch16_224_expert8"]
+__all__ = ["Gate", "ResBlock", "resmoe_tiny_patch16_224_expert8", "resmoe_tiny_patch16_224_expert8_attn_loss", "Block", "resvit_tiny_patch16_224"]
 
 
 def sampler(tensor, tau, temperature):
@@ -368,7 +368,8 @@ def forward_residule_vit(self, input_):
 
     tokens = tokens_fwd + tokens
 
-    tokens = tokens[:, 0 : input_.size(1) - skip_tk.size(1)]
+    num_skip_tk = 0 if skip_tk is None else skip_tk.size(1)
+    tokens = tokens[:, 0 : input_.size(1) - num_skip_tk]
 
     if skip_tk is not None and summary_skip_token is not None:
         update_skip_tk = (
