@@ -6,7 +6,7 @@ num_comma=`echo ${cuda} | tr -cd , | wc -c`
 num_cuda=$((${num_comma} + 1))
 
 port=$((9000 + RANDOM % 1000))
-model="resmoe_tiny_patch16_224_expert8"
+model="resmoe_tiny_patch16_224_expert8_attn_loss_v2"
 lr="2e-4"
 start_threshold="0.9"
 target_threshold="0.5"
