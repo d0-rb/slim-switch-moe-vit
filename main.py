@@ -457,6 +457,7 @@ def get_args_parser():
         type=float,
         help="num epoch apart in which gate will start to train",
     )
+    parser.add_argument("--vis-enabled", action="store_true")
 
     return parser
 
@@ -857,7 +858,8 @@ def main(args):
                         },
                         checkpoint_path,
                     )
-            vis.savefig(epoch)
+            if args.vis_enabled:
+                vis.savefig(epoch)
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
         # writer.log_scalar("max_acc", max_accuracy, epoch)
