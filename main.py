@@ -763,14 +763,15 @@ def main(args):
     start_time = time.time()
     max_accuracy = 0.0
 
-    delta: typ.Dict[str, typ.Tuple[float, int]] = {}
+    delta: typ.Dict[str, typ.Tuple[float, int, int]] = {}
     offset = args.gate_epoch_offset
     # i = 0
     for name, module in model.named_modules():
         if isinstance(module, (Gate)):
             delta[name] = (
-                (module._threshold - module.threshold) / (args.epochs - offset),
+                (module._threshold - module.threshold) / (args.epochs - offset * 2),
                 offset,
+                args.epochs - offset,
             )
             # i += 1
     # module.disable = True
@@ -821,14 +822,12 @@ def main(args):
         )
 
         for name, module in model.named_modules():
-            if name in delta and epoch >= delta[name][-1]:
+            if name in delta and epoch >= delta[name][1] and epoch < delta[name][-1]:
                 # module.disable = False
                 module.step(delta[name][0])
                 torch.cuda.reset_peak_memory_stats()
                 # print(f"{name=} {module._threshold}")
-                writer.log_scalar(
-                    f"threshold/{name}", module._threshold - delta[name][0], epoch
-                )
+                writer.log_scalar(f"threshold/{name}", module._threshold, epoch)
 
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
