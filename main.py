@@ -771,7 +771,7 @@ def main(args):
 
     delta: typ.Dict[str, typ.Tuple[float, int, int]] = {}
     offset_start = args.gate_epoch_starting_offset
-    offset_end = args.gate_epoch_end__offset
+    offset_end = args.gate_epoch_ending_offset
     # i = 0
     for name, module in model.named_modules():
         if isinstance(module, (Gate)):
