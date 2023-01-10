@@ -452,8 +452,14 @@ def get_args_parser():
         help="set learning for skip gates apart from the rest of our model",
     )
     parser.add_argument(
-        "--gate-epoch-offset",
+        "--gate-epoch-starting-offset",
         default=10,
+        type=float,
+        help="num epoch apart in which gate will start to train",
+    )
+    parser.add_argument(
+        "--gate-epoch-ending-offset",
+        default=0,
         type=float,
         help="num epoch apart in which gate will start to train",
     )
@@ -764,14 +770,16 @@ def main(args):
     max_accuracy = 0.0
 
     delta: typ.Dict[str, typ.Tuple[float, int, int]] = {}
-    offset = args.gate_epoch_offset
+    offset_start = args.gate_epoch_starting_offset
+    offset_end = args.gate_epoch_end__offset
     # i = 0
     for name, module in model.named_modules():
         if isinstance(module, (Gate)):
             delta[name] = (
-                (module._threshold - module.threshold) / (args.epochs - offset * 2),
-                offset,
-                args.epochs - offset,
+                (module._threshold - module.threshold)
+                / (args.epochs - offset_start - offset_end),
+                offset_start,
+                args.epochs - offset_end,
             )
             # i += 1
     # module.disable = True
