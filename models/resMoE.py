@@ -174,6 +174,7 @@ class GateMoE(nn.Module):
 
         self.disable = False
         self.tk_idx = None
+        self.attn_blk = attn_blk
 
     def step(self, delta: th.Tensor):
         thresh = self._threshold - delta
@@ -197,7 +198,11 @@ class GateMoE(nn.Module):
         threshold = self._threshold  # if self.training else self.threshold
         density = int(x.size(1) * threshold)  # type: ignore[operator]
 
-        logits = self.attn.x_cls_attn[:, self.patch_idx : x.size(1)]
+        logits = (
+            self.attn_blk.x_cls_attn.mean(dim=1)[:, self.patch_idx : x.size(1)]
+            .detach()
+            .clone()
+        )
 
         # prob = th.sigmoid(out)
 
@@ -687,14 +692,14 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_v4(
                 target_threshold=target_threshold_dense,
             )
 
+            module.moe_gate = GateMoE(
+                module.attn,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+                is_clk_tk=True,
+                is_dist_tk=False,
+            )
             if moe_placement.pop(0):
-                module.moe_gate = GateMoE(
-                    module.attn,
-                    starting_threshold=starting_threshold_moe,
-                    target_threshold=target_threshold_moe,
-                    is_clk_tk=True,
-                    is_dist_tk=False,
-                )
 
                 module.mlp = CustomizedMoEMLP(
                     embed_dim,
