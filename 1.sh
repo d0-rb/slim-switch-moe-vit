@@ -1,14 +1,15 @@
 #!/bin/bash
 
-model=resmoe_tiny_patch16_224_expert8_attn_loss
-CUDA=0
+model=resmoe_tiny_patch16_224_expert8_attn_loss_v3
+#model=resvit_tiny_patch16_224_v2
+CUDA=1
 SEED=0
 START_THRESHOLD_DENSE=0.9
 TARGET_THRESHOLD_DENSE=0.5
-START_THRESHOLD_MOE=0.9
+START_THRESHOLD_MOE=0.2
 TARGET_THRESHOLD_MOE=0.5
-LR=2e-4
-EPOCH=400
+LR=3e-4
+EPOCH=300
 
 CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model $model --data-set CIFAR10 --data-path ./dataset --batch 156 \
                 --lr ${LR} --epochs ${EPOCH} --weight-decay 0.05 --sched cosine --input-size 224 \

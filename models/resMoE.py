@@ -65,7 +65,9 @@ class Gate(nn.Module):
         target_threshold: float = 0.9,
         starting_threshold: float = 1.0,
         is_hard: float = True,
+        add_guass_noise: bool = False,
     ):
+
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
         self.head = nn.Linear(in_dim, 1)
@@ -80,6 +82,8 @@ class Gate(nn.Module):
         self.is_hard = is_hard
         self.disable = False
         self.tk_idx = None
+        self.add_guass_noise = add_guass_noise
+        self.tau = tau
 
     def step(self, delta: th.Tensor):
         thresh = self._threshold - delta
@@ -103,6 +107,9 @@ class Gate(nn.Module):
         threshold = self._threshold  # if self.training else self.threshold
         density = int(x.size(1) * threshold)  # type: ignore[operator]
         logits = self.head(self.dropout(x)).squeeze()  # (B x Token x 1)
+
+        if self.training and self.add_guass_noise:
+            logits = logits + th.rand_like(logits) / self.tau
 
         # prob = th.sigmoid(out)
 
@@ -128,7 +135,9 @@ class Gate(nn.Module):
             summary_skip_token = (skip_tokens * values.unsqueeze(dim=-1)).sum(
                 dim=1, keepdim=True
             )
-            self.gate_attn = th.cat([values_tk, values_skip_tk.mean(dim=-1,keepdim=True)], dim=-1)
+            self.gate_attn = th.cat(
+                [values_tk, values_skip_tk.mean(dim=-1, keepdim=True)], dim=-1
+            )
 
             self._skipped_tokens += math.prod(index.shape)
         self._total_tokens += math.prod(x.shape[0:2])
@@ -423,8 +432,11 @@ def forward_residule_moe_w_attn_loss_v3(self, x):
         cls_attn = (
             self.attn.x_cls_attn.mean(dim=1)[:, 0:-1].softmax(dim=-1).detach().clone()
         )  # mean over all heads
-        self.attn_loss = F.kl_div(
-            self.dense_gate.gate_attn.log_softmax(dim=-1), cls_attn, log_target=True
+        self.attn_loss = (
+            F.kl_div(
+                self.dense_gate.gate_attn.log_softmax(dim=-1), cls_attn, log_target=True
+            )
+            * 0.1
         )
         # loss = cls_attn[:, -2] - cls_attn[:, -1]  # skip_sum - non_skip_sum
         # loss = loss[loss > 0].mean()
@@ -597,6 +609,7 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_v3(
                 dropout=0.0,
                 starting_threshold=starting_threshold_moe,
                 target_threshold=target_threshold_moe,
+                add_guass_noise=True,
             )
 
             module.mlp = CustomizedMoEMLP(
@@ -608,7 +621,7 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_v3(
             )
             module.is_cls_token = True
             module.is_dist_token = False
-            bound_method = forward_residule_moe_w_attn_loss_v3.__get__(
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
                 module, module.__class__
             )
             setattr(module, "forward", bound_method)
