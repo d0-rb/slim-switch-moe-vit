@@ -128,7 +128,100 @@ class Gate(nn.Module):
             summary_skip_token = (skip_tokens * values.unsqueeze(dim=-1)).sum(
                 dim=1, keepdim=True
             )
-            self.gate_attn = th.cat([values_tk, values_skip_tk.mean(dim=-1,keepdim=True)], dim=-1)
+            self.gate_attn = th.cat(
+                [values_tk, values_skip_tk.mean(dim=-1, keepdim=True)], dim=-1
+            )
+
+            self._skipped_tokens += math.prod(index.shape)
+        self._total_tokens += math.prod(x.shape[0:2])
+
+        return tokens, skip_tokens, summary_token, summary_skip_token
+
+    def index_select(self, x, index):
+        """index_select code donated by Junru.
+
+        :x: TODO
+        :index: TODO
+        :returns: TODO
+
+        """
+        B, T, D = x.shape
+        index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
+        return th.gather(input=x, dim=1, index=index_repeat)
+
+
+class GateMoE(nn.Module):
+    def __init__(
+        self,
+        attn_blk: nn.Module,
+        starting_threshold: float,
+        target_threshold: float,
+        is_clk_tk: bool,
+        is_dist_tk: bool,
+    ):
+        super().__init__()
+        self.register_buffer("_threshold", th.tensor(starting_threshold))
+        self.register_buffer("threshold", th.tensor(target_threshold))
+
+        self.comparison_fn = max if starting_threshold > target_threshold else min
+
+        self._total_tokens = 0
+        self._skipped_tokens = 0
+        self.is_clk_tk = is_clk_tk
+        self.is_dist_tk = is_dist_tk
+
+        self.patch_idx = int(self.is_clk_tk) + int(self.is_dist_tk)
+
+        self.disable = False
+        self.tk_idx = None
+
+    def step(self, delta: th.Tensor):
+        thresh = self._threshold - delta
+        self._threshold.data.copy_(
+            self.comparison_fn(thresh, self.threshold)  # type: ignore[call-overload]
+        )  # type: ignore[operator]
+
+    def forward(
+        self, x: th.Tensor
+    ) -> typ.Tuple[th.Tensor, th.Tensor | None, th.Tensor | None, th.Tensor | None]:
+
+        if self.disable:
+            return x, None, None, None
+
+        tokens: th.Tensor
+        skip_tokens: th.Tensor | None = None
+        summary_token: th.Tensor | None = None
+        summary_skip_token: th.Tensor | None = None
+        # cuda = x.device
+
+        threshold = self._threshold  # if self.training else self.threshold
+        density = int(x.size(1) * threshold)  # type: ignore[operator]
+
+        logits = self.attn.x_cls_attn[:, self.patch_idx : x.size(1)]
+
+        # prob = th.sigmoid(out)
+
+        values_tk, index = logits.topk(k=density, dim=1)
+        self.tk_idx = index
+
+        tokens = self.index_select(x, index)
+
+        skip_tokens = None
+        summary_token = None
+        if x.size(1) - density > 0:
+            values_skip_tk, index = logits.topk(
+                k=x.size(1) - density, dim=1, largest=False
+            )
+            self.tk_idx = th.cat([self.tk_idx, index], dim=1)
+            skip_tokens = self.index_select(x, index)
+            # if x_cls is not None:
+            values = values_skip_tk.softmax(dim=-1)
+            summary_skip_token = (skip_tokens * values.unsqueeze(dim=-1)).sum(
+                dim=1, keepdim=True
+            )
+            self.gate_attn = th.cat(
+                [values_tk, values_skip_tk.mean(dim=-1, keepdim=True)], dim=-1
+            )
 
             self._skipped_tokens += math.prod(index.shape)
         self._total_tokens += math.prod(x.shape[0:2])
@@ -563,6 +656,60 @@ def mask_and_forward(
 
 from .model import deit_tiny_patch16_224
 from .model import deit_tiny_distilled_patch16_224
+
+
+@register_model
+def resmoe_tiny_patch16_224_expert8_attn_loss_v4(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    moe_placement = [0, 1] * (depth // 2)
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.dense_gate = Gate(
+                embed_dim,
+                1.0,
+                dropout=0.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+            )
+
+            if moe_placement.pop(0):
+                module.moe_gate = GateMoE(
+                    module.attn,
+                    starting_threshold=starting_threshold_moe,
+                    target_threshold=target_threshold_moe,
+                    is_clk_tk=True,
+                    is_dist_tk=False,
+                )
+
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                module, module.__class__
+            )
+            setattr(module, "forward", bound_method)
+    return model
 
 
 @register_model
