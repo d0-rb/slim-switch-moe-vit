@@ -17,6 +17,7 @@ __all__ = [
     "ResBlock",
     "resmoe_tiny_patch16_224_expert8",
     "resmoe_tiny_patch16_224_expert8_attn_loss",
+    "resmoe_tiny_patch16_224_expert8_attn_loss_v2",
     "Block",
     "resvit_tiny_patch16_224",
 ]
