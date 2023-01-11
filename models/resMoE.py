@@ -115,8 +115,6 @@ class Gate(nn.Module):
             values = values_tk.softmax(dim=-1)
             summary_token = (tokens * values.unsqueeze(dim=-1)).sum(dim=1, keepdim=True)
 
-        skip_tokens = None
-        summary_token = None
         if x.size(1) - density > 0:
             values_skip_tk, index = logits.topk(
                 k=x.size(1) - density, dim=1, largest=False
@@ -199,7 +197,7 @@ class GateMoE(nn.Module):
         density = int(x.size(1) * threshold)  # type: ignore[operator]
 
         logits = (
-            self.attn_blk.x_cls_attn.mean(dim=1)[:, self.patch_idx : x.size(1)]
+            self.attn_blk.x_cls_attn.mean(dim=1)[:, self.patch_idx : x.size(1) + 1]
             .detach()
             .clone()
         )
@@ -350,70 +348,90 @@ def forward_residule_moe_w_attn_loss_v2(self, x):
         patch_tk
     )  # , 1::])
 
-    tokens = th.cat(
-        list(
-            filter(
-                lambda x: x is not None,  # type: ignore[arg-type]
-                [cls_token, dist_token, tokens, summary_skip_token, summary_token],
-            )
-        ),
-        dim=1,
-    )
-    token_attn = self.drop_path(self.attn(tokens))  # + tokens
-
-    sum_idx = -2 if summary_token is not None else -1
-
-    summary_skip_token_attn = token_attn[:, sum_idx].unsqueeze(dim=1)
-
-    token_attn = (token_attn + tokens)[:, 0:sum_idx]  # get rid of sum_skip and sum_tk
-
-    token_attn = self.norm2(token_attn)
-
-    #######################
-    patch_tk = token_attn[:, patch_idx::]
-    tokens, skip_tk_mlp, _, summary_skip_token = self.moe_gate(patch_tk)  # , 1::])
-
-    tokens = th.cat(
+    tokens_to_attn = th.cat(
         list(
             filter(
                 lambda x: x is not None,  # type: ignore[arg-type]
                 [
-                    token_attn[:, 0:patch_idx],
+                    cls_token,
+                    dist_token,
                     tokens,
                     summary_skip_token,
-                    summary_skip_token_attn,
+                    summary_token,
                 ],
             )
         ),
         dim=1,
     )
 
-    token_mlp = self.drop_path(self.mlp(tokens))
+    attended_tokens = self.drop_path(self.attn(tokens_to_attn))
 
-    summary_skip_token_mlp_full = token_mlp[:, -1].unsqueeze(dim=1)
-    summary_skip_token_mlp_half = token_mlp[:, -2].unsqueeze(dim=1)
+    if summary_token is not None:
+        attended_tokens = attended_tokens[:, 0:-1]
 
-    token_mlp = token_mlp + tokens
-    tokens = token_mlp[:, 0:-2]
+    if summary_skip_token is not None:
+        attn_skip_token = attended_tokens[:, -1].unsqueeze(dim=1)
+        attended_tokens = attended_tokens[:, 0:-1]
+    else:
+        attn_skip_token = None
+
+    attended_tokens += tokens_to_attn[:, 0 : attended_tokens.size(1)]
+
+    attended_tokens = self.norm2(attended_tokens)
+
+    #######################
+    # patch_tk = attended_tokens[:, patch_idx::]
+    tokens, skip_tk_mlp, _, summary_skip_token = self.moe_gate(
+        attended_tokens[:, patch_idx::]
+    )  # , 1print("#2 tokens:", tokens.shape)
+
+    tokens_to_fwd = th.cat(
+        list(
+            filter(
+                lambda x: x is not None,  # type: ignore[arg-type]
+                [
+                    attended_tokens[:, 0:patch_idx],
+                    tokens,
+                    summary_skip_token,
+                    attn_skip_token,
+                ],
+            )
+        ),
+        dim=1,
+    )
+
+    fwded_tokens = self.drop_path(self.mlp(tokens_to_fwd))
+
+    if attn_skip_token is not None:
+        summary_skip_token_mlp_full = fwded_tokens[:, -1].unsqueeze(dim=1)
+        fwded_tokens = fwded_tokens[:, 0:-1]
+    else:
+        summary_skip_token_mlp_full = None
+
+    if summary_skip_token is not None:
+        summary_skip_token_mlp_half = fwded_tokens[:, -1].unsqueeze(dim=1)
+        fwded_tokens = fwded_tokens[:, 0:-1]
+    else:
+        summary_skip_token_mlp_half = None
+
+    fwded_tokens += tokens_to_fwd[:, 0 : fwded_tokens.size(1)]
 
     if skip_tk_attn is not None:  # and summary_skip_token is not None:
         update_skip_tk_1 = (
             skip_tk_attn
-            + summary_skip_token_attn.tile(skip_tk_attn.size(1)).view(
-                skip_tk_attn.shape
-            )
+            + attn_skip_token.tile(skip_tk_attn.size(1)).view(skip_tk_attn.shape)
             + summary_skip_token_mlp_full.tile(skip_tk_attn.size(1)).view(
                 skip_tk_attn.shape
             )
         )
-        tokens = th.cat((tokens, update_skip_tk_1), dim=1)
+        fwded_tokens = th.cat((fwded_tokens, update_skip_tk_1), dim=1)
 
     if skip_tk_mlp is not None:
-        update_skip_tk_2 = skip_tk_mlp + summary_skip_token_mlp_full.tile(
+        update_skip_tk_2 = skip_tk_mlp + summary_skip_token_mlp_half.tile(
             skip_tk_mlp.size(1)
         ).view(skip_tk_mlp.shape)
 
-        tokens = th.cat((tokens, update_skip_tk_2), dim=1)
+        fwded_tokens = th.cat((fwded_tokens, update_skip_tk_2), dim=1)
 
     if hasattr(self.attn, "x_cls_attn"):
         cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
@@ -422,7 +440,7 @@ def forward_residule_moe_w_attn_loss_v2(self, x):
         if th.isnan(loss):
             loss = th.tensor(0).to(x.device)
         self.attn_loss = loss
-    return tokens
+    return fwded_tokens
 
 
 def forward_residule_moe_w_attn_loss_v3(self, x):
