@@ -891,6 +891,49 @@ def resvit_tiny_patch16_224_v2(
 
 
 @register_model
+def resvit_tiny_patch16_224_v4(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.dense_gate = Gate(
+                embed_dim,
+                1.0,
+                dropout=0.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+            )
+            module.moe_gate = GateMoE(
+                module.attn,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+                is_clk_tk=True,
+                is_dist_tk=False,
+            )
+
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                module, module.__class__
+            )
+            setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
 def resmoe_tiny_patch16_224_expert8_attn_loss(
     pretrained=False,
     starting_threshold_dense=1.0,
