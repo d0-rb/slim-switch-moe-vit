@@ -75,11 +75,14 @@ class Gate(nn.Module):
         self.disable = False
         self.tk_idx = None
 
-    def step(self, delta: th.Tensor):
-        thresh = self._threshold - delta
-        self._threshold.data.copy_(
-            max(thresh, self.threshold)  # type: ignore[call-overload]
-        )  # type: ignore[operator]
+    # def step(self, delta: th.Tensor):
+    #     thresh = self._threshold - delta
+    #     self._threshold.data.copy_(
+    #         max(thresh, self.threshold)  # type: ignore[call-overload]
+    #     )  # type: ignore[operator]
+
+    def step(self, threshold: th.Tensor):
+        self._threshold.data.copy_(threshold)
 
     def forward(
         self, x: th.Tensor
