@@ -21,6 +21,7 @@ __all__ = [
     "Block",
     "resvit_tiny_patch16_224",
     "resmoe_tiny_patch16_224_expert8_attn_loss_v4",
+    "resmoe_tiny_patch16_224_expert8_v5",
 ]
 
 
@@ -243,6 +244,108 @@ class GateMoE(nn.Module):
         B, T, D = x.shape
         index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
         return th.gather(input=x, dim=1, index=index_repeat)
+
+
+class GateSummarizer(nn.Module):  # gate that summarizes tokens by groups
+    def __init__(
+        self,
+        in_dim: int,
+        tau: float,
+        dropout: float = 0.5,
+        target_threshold: float = 0.9,
+        starting_threshold: float = 1.0,
+        is_hard: float = True,
+    ):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.head = nn.Linear(in_dim, 1)
+        self.register_buffer("_threshold", th.tensor(starting_threshold))
+        self.register_buffer("threshold", th.tensor(target_threshold))
+
+        self.comparison_fn = max if starting_threshold > target_threshold else min
+
+        self.is_hard = is_hard
+        self.disable = False
+        self.tk_idx = None
+
+    def step(self, delta: th.Tensor):
+        thresh = self._threshold - delta
+        self._threshold.data.copy_(
+            self.comparison_fn(thresh, self.threshold)  # type: ignore[call-overload]
+        )  # type: ignore[operator]
+    
+    def grouping_curve_poly(self, x, threshold, floats=False) -> th.Tensor:
+        B, T, D = x.shape
+
+        grouping_idx = th.arange(T, device=x.device).double()  # 0 1 ... T - 1
+        grouping_idx /= T  # 0 1/T ... (T - 1)/T
+        grouping_idx = threshold - threshold * ((1 - grouping_idx) ** (1/threshold))  # follows curve, range is [0, threshold)
+
+        if floats:
+            return grouping_idx
+        
+        grouping_idx *= T  # range is [0, threshold * T), so now it maps from our input tokens to new pruned tokens
+        return grouping_idx.floor().long().unsqueeze(0).expand(B, -1)  # make into indices for each batch
+    
+    def grouping_curve_poly_linear(self, x, threshold, linear_threshold) -> th.Tensor:
+        assert linear_threshold <= threshold
+        B, T, D = x.shape
+
+        linear_idx = int(linear_threshold * T)
+
+        grouping_idx = th.arange(T, device=x.device, dtype=th.int64)  # 0 1 ... T - 1
+
+        poly_curve = self.grouping_curve_poly(x[:, linear_idx::], (threshold - linear_threshold) / (1. - linear_threshold), floats=True)  # range [0, (threshold - linear_threshold) / (1. - linear_threshold))
+        poly_curve *= (1. - linear_threshold)  # range [0, threshold - linear_threshold)
+        poly_curve += linear_threshold  # range [linear_threshold, threshold)
+        poly_curve *= T
+
+        grouping_idx[linear_idx:] = poly_curve.floor().long()
+
+        return grouping_idx.unsqueeze(0).expand(B, -1)  # make into indices for each batch
+
+    def forward(
+        self, x: th.Tensor
+    ) -> typ.Tuple[th.Tensor, th.Tensor | None, th.Tensor | None, th.Tensor | None]:
+
+        if self.disable:
+            return x, None, None, None
+
+        tokens: th.Tensor
+        skip_tokens: th.Tensor | None = None
+        summary_token: th.Tensor | None = None
+        summary_skip_token: th.Tensor | None = None
+        # cuda = x.device
+
+        logits = self.head(self.dropout(x)).squeeze()  # (B x Token x 1)
+
+        # prob = th.sigmoid(out)
+
+        values_tk, sort_idx = logits.sort(dim=1, descending=True)
+
+        summarized_tokens, grp_idx = self.group_tokens(x, sort_idx)
+        
+        self.tk_idx = grp_idx
+
+        return summarized_tokens, grp_idx
+
+    def group_tokens(self, x, idx):
+        """groups tokens based on index (decreasing importance) and threshold
+
+        idx should be shape (B, T)
+        """
+        B, T, D = x.shape
+        density = int(T * self._threshold)  # type: ignore[operator]
+        threshold = density / T
+
+        grouping_idx = self.grouping_curve_poly_linear(x, threshold, threshold * 0.7)  # follows curve, range is [0, threshold)
+        # grouping_idx = self.grouping_curve_poly(x, threshold)  # follows curve, range is [0, threshold)
+        grouping_idx = th.gather(grouping_idx, dim=1, index=idx).unsqueeze(-1).expand(-1, -1, D)  # compose indices
+
+        grouped_tokens = th.zeros((B, density, D), device=x.device, dtype=x.dtype)
+        grouped_tokens = grouped_tokens.scatter_add_(dim=1, index=grouping_idx, src=x)  # add our tokens according to summary groups
+
+        return grouped_tokens, grouping_idx
 
 
 class ResBlock(Block):
@@ -548,6 +651,69 @@ def forward_residule_moe_w_attn_loss_v3(self, x):
         # if th.isnan(loss):
         # loss = th.tensor(0).to(x.device)
         # self.attn_loss = loss
+    return tokens
+
+
+def forward_residule_moe_v5(self, x):
+    x = self.norm1(x)
+    
+    cls_token: th.Tensor | None = None
+    dist_token: th.Tensor | None = None
+
+    summarized_tokens: th.Tensor  # tokens summarized by groups
+    full_summarized_tokens: th.Tensor  # summarized tokens along with class/distil tokens
+    patch_tk: th.Tensor
+    tokens: th.Tensor = x
+
+    patch_idx = 0
+
+    if self.is_cls_token:
+        cls_token = x[:, 0].unsqueeze(dim=1)
+        patch_idx += 1
+    if self.is_dist_token:
+        dist_token = x[:, 1].unsqueeze(dim=1)
+        patch_idx += 1
+
+    patch_tk = x[:, patch_idx::]
+
+    summarized_tokens, grp_idx = self.dense_gate(patch_tk)  # , 1::])
+
+    full_summarized_tokens = th.cat(
+        list(
+            filter(
+                lambda x: x is not None,  # type: ignore[arg-type]
+                [cls_token, dist_token, summarized_tokens],
+            )
+        ),
+        dim=1,
+    )
+
+    tokens_fwd = self.drop_path(self.attn(full_summarized_tokens))  # put summarized tokens + cls/distil token thru attn
+
+    tokens[:, :patch_idx] = tokens_fwd[:, :patch_idx]
+    tokens[:, patch_idx::] += tokens_fwd[:, patch_idx::].gather(dim=1, index=grp_idx)
+
+    tokens = self.norm2(tokens)
+
+    patch_tk = tokens[:, patch_idx::]
+
+    summarized_tokens, grp_idx = self.moe_gate(patch_tk)  # , 1::])
+
+    full_summarized_tokens = th.cat(
+        list(
+            filter(
+                lambda x: x is not None,  # type: ignore[arg-type]
+                [cls_token, dist_token, summarized_tokens],
+            )
+        ),
+        dim=1,
+    )
+
+    tokens_fwd = self.drop_path(self.mlp(full_summarized_tokens))  # put summarized tokens + cls/distil token thru attn
+
+    tokens[:, :patch_idx] = tokens_fwd[:, :patch_idx]
+    tokens[:, patch_idx::] += tokens_fwd[:, patch_idx::].gather(dim=1, index=grp_idx)
+    
     return tokens
 
 
@@ -930,58 +1096,6 @@ def resmoe_tiny_patch16_224_expert8_attn_loss(
 
 
 @register_model
-def resmoe_tiny_patch16_224_expert8_attn_loss_nonorm1(
-    pretrained=False,
-    starting_threshold_dense=1.0,
-    target_threshold_dense=0.9,
-    starting_threshold_moe=1.0,
-    target_threshold_moe=0.9,
-    **kwargs,
-):
-    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
-    patch_size = 16
-    embed_dim = 192
-    depth = 12
-    num_heads = 3
-    mlp_ratio = 4
-    drop_rate = 0.0
-
-    for name, module in model.named_modules():
-        if isinstance(module, Block):
-            module.dense_gate = Gate(
-                embed_dim,
-                1.0,
-                dropout=0.0,
-                starting_threshold=starting_threshold_dense,
-                target_threshold=target_threshold_dense,
-            )
-            module.moe_gate = Gate(
-                embed_dim,
-                1.0,
-                dropout=0.0,
-                starting_threshold=starting_threshold_moe,
-                target_threshold=target_threshold_moe,
-            )
-            module.norm1 = nn.Identity()
-            module.norm2 = nn.Identity()
-
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=8,
-                moe_top_k=2,
-                drop=drop_rate,
-            )
-            module.is_cls_token = True
-            module.is_dist_token = False
-            bound_method = forward_residule_moe_w_attn_loss.__get__(
-                module, module.__class__
-            )
-            setattr(module, "forward", bound_method)
-    return model
-
-
-@register_model
 def resmoe_tiny_distilled_patch16_224_expert8(
     pretrained=False,
     starting_threshold_dense=1.0,
@@ -1023,6 +1137,52 @@ def resmoe_tiny_distilled_patch16_224_expert8(
             module.is_cls_token = True
             module.is_dist_token = True
             bound_method = forward_residule_moe.__get__(module, module.__class__)
+            setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def resmoe_tiny_patch16_224_expert8_v5(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.dense_gate = GateSummarizer(
+                embed_dim,
+                1.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+            )
+            module.moe_gate = GateSummarizer(
+                embed_dim,
+                1.0,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+            )
+
+            module.mlp = CustomizedMoEMLP(
+                embed_dim,
+                embed_dim * mlp_ratio,
+                moe_num_experts=8,
+                moe_top_k=2,
+                drop=drop_rate,
+            )
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_v5.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
     return model
 
