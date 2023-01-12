@@ -33,7 +33,7 @@ from datasets import build_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from models.resMoE import Gate
+from models.resMoE import Gate, GateSummarizer
 from samplers import RASampler
 from utils import TensorboardXTracker
 
@@ -774,7 +774,7 @@ def main(args):
     offset_end = args.gate_epoch_ending_offset
     # i = 0
     for name, module in model.named_modules():
-        if isinstance(module, (Gate)):
+        if isinstance(module, (Gate)) or isinstance(module, (GateSummarizer)):
             delta[name] = (
                 (module._threshold - module.threshold)
                 / (args.epochs - offset_start - offset_end),
