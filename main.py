@@ -36,6 +36,8 @@ from losses import DistillationLoss
 from models.resMoE import Gate
 from samplers import RASampler
 from utils import TensorboardXTracker
+from torch.optim.optimizer import Optimizer
+from threshold_scheduler import LinearLR, CosineAnnealingLR
 
 # import models_v2
 
@@ -81,6 +83,7 @@ def get_args_parser():
     parser.add_argument(
         "--model-ema-force-cpu", action="store_true", default=False, help=""
     )
+    parser.add_argument("--debug", action="store_true")
 
     # Optimizer parameters
     parser.add_argument(
