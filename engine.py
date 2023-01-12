@@ -106,7 +106,7 @@ def train_one_epoch(
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-        # break
+        break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -124,6 +124,7 @@ def evaluate(data_loader, model, device):
     model.eval()
 
     for images, target in metric_logger.log_every(data_loader, 10, header):
+
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
@@ -139,7 +140,7 @@ def evaluate(data_loader, model, device):
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
 
-        # break
+        break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print(

@@ -75,8 +75,6 @@ class Gate(nn.Module):
         self.register_buffer("_threshold", th.tensor(starting_threshold))
         self.register_buffer("threshold", th.tensor(target_threshold))
 
-        self.comparison_fn = max if starting_threshold > target_threshold else min
-
         self._total_tokens = 0
         self._skipped_tokens = 0
 
@@ -86,11 +84,8 @@ class Gate(nn.Module):
         self.add_guass_noise = add_guass_noise
         self.tau = tau
 
-    def step(self, delta: th.Tensor):
-        thresh = self._threshold - delta
-        self._threshold.data.copy_(
-            self.comparison_fn(thresh, self.threshold)  # type: ignore[call-overload]
-        )  # type: ignore[operator]
+    def step(self, threshold: th.Tensor):
+        self._threshold.data.copy_(threshold)
 
     def forward(
         self, x: th.Tensor
@@ -182,11 +177,8 @@ class GateMoE(nn.Module):
         self.tk_idx = None
         self.attn_blk = attn_blk
 
-    def step(self, delta: th.Tensor):
-        thresh = self._threshold - delta
-        self._threshold.data.copy_(
-            self.comparison_fn(thresh, self.threshold)  # type: ignore[call-overload]
-        )  # type: ignore[operator]
+    def step(self, threshold: th.Tensor):
+        self._threshold.data.copy_(threshold)
 
     def forward(
         self, x: th.Tensor
@@ -780,6 +772,8 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_v3(
                 target_threshold=target_threshold_moe,
                 add_guass_noise=True,
             )
+            module.norm1 = nn.Identity()
+            module.norm2 = nn.Identity()
 
             module.mlp = CustomizedMoEMLP(
                 embed_dim,
@@ -830,6 +824,8 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_v2(
                 starting_threshold=starting_threshold_moe,
                 target_threshold=target_threshold_moe,
             )
+            module.norm1 = nn.Identity()
+            module.norm2 = nn.Identity()
 
             module.mlp = CustomizedMoEMLP(
                 embed_dim,
@@ -869,14 +865,12 @@ def resvit_tiny_patch16_224_v2(
             module.dense_gate = Gate(
                 embed_dim,
                 1.0,
-                dropout=0.0,
                 starting_threshold=starting_threshold_dense,
                 target_threshold=target_threshold_dense,
             )
             module.moe_gate = Gate(
                 embed_dim,
                 1.0,
-                dropout=0.0,
                 starting_threshold=starting_threshold_moe,
                 target_threshold=target_threshold_moe,
             )
@@ -1122,7 +1116,7 @@ def resmoe_tiny_patch16_224_expert8(
             )
             module.is_cls_token = True
             module.is_dist_token = False
-            bound_method = forward_residule_moe.__get__(module, module.__class__)
+            bound_method = forward_residule_vit.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
     return model
 

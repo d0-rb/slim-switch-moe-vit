@@ -405,6 +405,16 @@ def get_args_parser():
     )
 
     parser.add_argument(
+        "--threshold-scheduler",
+        default="cosine",
+        choices=[
+            "linear",
+            "cosine",
+        ],
+        type=str,
+        help="threshold scheduler",
+    )
+    parser.add_argument(
         "--starting-threshold",
         default=None,
         type=float,
@@ -672,11 +682,53 @@ def main(args):
         model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
     )
 
+    # def param_group_threshold_fn(model: torch.nn.Module):
+    #     dense_params = []
+    #     gate_params = []
+    #     # for name, param in model.named_parameters():
+    #     #     if "dense_gate" in name:
+    #     #         dense_params.append(param)
+    #     #     elif "moe_gate" in name:
+    #     #         gate_params.append(param)
+    #
+    #     ret = [
+    #         {"params": dense_params, "lr": args.starting_threshold_dense},
+    #         {"params": gate_params, "lr": args.starting_threshold_moe},
+    #     ]
+    #     return ret
+    threshold_optimizers = {}
+    if args.threshold_scheduler == "cosine":
+        threshold_optimizers["dense"] = Optimizer(params=[{"params": []}], defaults={"lr": args.starting_threshold_dense})
+        threshold_optimizers["moe"] = Optimizer(params=[{"params": []}], defaults={"lr": args.starting_threshold_moe})
+    elif args.threshold_scheduler == "linear":
+        threshold_optimizers["dense"] = Optimizer(params=[{"params": []}], defaults={"lr": args.target_threshold_dense})
+        threshold_optimizers["moe"] = Optimizer(params=[{"params": []}], defaults={"lr": args.target_threshold_moe})
+    threshold_schedulers = {}
+    # for threshold_optimizer in threshold_optimizers:
+    if args.threshold_scheduler == "cosine":
+        threshold_schedulers["dense"] = CosineAnnealingLR(threshold_optimizers["dense"],
+                                                          T_max=args.epochs,
+                                                          eta_min=args.target_threshold_dense,
+                                                          last_epoch=-1)
+        threshold_schedulers["moe"] = CosineAnnealingLR(threshold_optimizers["moe"],
+                                                      T_max=args.epochs,
+                                                      eta_min=args.target_threshold_moe,
+                                                      last_epoch=-1)
+    elif args.threshold_scheduler == "linear":
+        threshold_schedulers["dense"] = LinearLR(threshold_optimizers["dense"],
+                                                 start_factor=args.starting_threshold_dense/args.target_threshold_dense,
+                                                 end_factor=1.0,
+                                                 total_iters=args.epochs)
+        threshold_schedulers["moe"] = LinearLR(threshold_optimizers["moe"],
+                                               start_factor=args.starting_threshold_moe/args.target_threshold_moe,
+                                               end_factor=1.0,
+                                               total_iters=args.epochs)
+    else:
+        NotImplementedError
+
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
-
-    criterion = LabelSmoothingCrossEntropy()
 
     if mixup_active:
         # smoothing is handled with mixup label transform
@@ -768,25 +820,23 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
-
-    delta: typ.Dict[str, typ.Tuple[float, int, int]] = {}
-    offset_start = args.gate_epoch_starting_offset
-    offset_end = args.gate_epoch_ending_offset
-    # i = 0
-    for name, module in model.named_modules():
-        if isinstance(module, (Gate)):
-            delta[name] = (
-                (module._threshold - module.threshold)
-                / (args.epochs - offset_start - offset_end),
-                offset_start,
-                args.epochs - offset_end,
-            )
-            # i += 1
-    # module.disable = True
-    # print(delta)
+    threshold = {}
     for epoch in range(args.start_epoch, args.epochs):
+        torch.cuda.reset_peak_memory_stats()
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
+        threshold["dense"] = threshold_schedulers["dense"].step(epoch)
+        writer.log_scalar("train/thresholds/dense", threshold["dense"], epoch)
+        threshold["moe"] = threshold_schedulers["moe"].step(epoch)
+        writer.log_scalar("train/thresholds/gate", threshold["moe"], epoch)
+
+        for name, module in model.named_modules():
+            if name.endswith("dense_gate"):
+                module.step(threshold["dense"][0])
+                writer.log_scalar(f"threshold/{name}", threshold["dense"], epoch)
+            elif name.endswith("moe_gate"):
+                module.step(threshold["moe"][0])
+                writer.log_scalar(f"threshold/{name}", threshold["moe"], epoch)
 
         train_stats = train_one_epoch(
             model,
@@ -829,14 +879,6 @@ def main(args):
             "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
         )
 
-        for name, module in model.named_modules():
-            if name in delta and epoch >= delta[name][1] and epoch < delta[name][-1]:
-                # module.disable = False
-                module.step(delta[name][0])
-                torch.cuda.reset_peak_memory_stats()
-                # print(f"{name=} {module._threshold}")
-                writer.log_scalar(f"threshold/{name}", module._threshold, epoch)
-
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
         )
@@ -869,14 +911,13 @@ def main(args):
                 vis.savefig(epoch)
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
-        # writer.log_scalar("max_acc", max_accuracy, epoch)
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
         for name, m in model.named_modules():
             if isinstance(m, (Gate)):
                 skip_ratio = m._skipped_tokens / m._total_tokens
                 writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
-                # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
+                # writer.log_scalar(f"grad/{name}", train_stats[name], epoch)
                 m._skipped_tokens = 0.0
                 m._total_tokens = 0.0
 
