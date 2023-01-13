@@ -34,6 +34,7 @@ from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
 from models.resMoE import Gate
+from models.resMoE import GateMoE
 from samplers import RASampler
 from utils import TensorboardXTracker
 
@@ -446,12 +447,6 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--gate-lr",
-        default=1e-4,
-        type=float,
-        help="set learning for skip gates apart from the rest of our model",
-    )
-    parser.add_argument(
         "--gate-epoch-starting-offset",
         default=10,
         type=float,
@@ -464,6 +459,9 @@ def get_args_parser():
         help="num epoch apart in which gate will start to train",
     )
     parser.add_argument("--vis-enabled", action="store_true")
+    parser.add_argument(
+        "--gate-lr", default=None, type=float, help="[DEPRECATED] use --lr instead"
+    )
 
     return parser
 
@@ -664,7 +662,7 @@ def main(args):
                 base_params.append(param)
         ret = [
             {"params": base_params},
-            {"params": gate_params, "lr": args.gate_lr},
+            {"params": gate_params, "lr": args.lr},
         ]
         return ret
 
@@ -763,6 +761,7 @@ def main(args):
         writer=writer,
         args=args,
         skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
+        version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
     )
 
     print(f"Start training for {args.epochs} epochs")
@@ -770,17 +769,23 @@ def main(args):
     max_accuracy = 0.0
 
     delta: typ.Dict[str, typ.Tuple[float, int, int]] = {}
+    delta_noise: typ.Dict[str, typ.Tuple[float, int, int]] = {}
     offset_start = args.gate_epoch_starting_offset
     offset_end = args.gate_epoch_ending_offset
     # i = 0
     for name, module in model.named_modules():
-        if isinstance(module, (Gate)):
+        if isinstance(module, (Gate, GateMoE)):
             delta[name] = (
                 (module._threshold - module.threshold)
                 / (args.epochs - offset_start - offset_end),
                 offset_start,
                 args.epochs - offset_end,
             )
+            # delta_noise[name] = (
+            # (module.tau) / (args.epochs - offset_start - offset_end),
+            # offset_start,
+            # args.epochs - offset_end,
+            # )
             # i += 1
     # module.disable = True
     # print(delta)
@@ -833,9 +838,11 @@ def main(args):
             if name in delta and epoch >= delta[name][1] and epoch < delta[name][-1]:
                 # module.disable = False
                 module.step(delta[name][0])
+                # module.step_tau(delta_noise[name][0])
                 torch.cuda.reset_peak_memory_stats()
                 # print(f"{name=} {module._threshold}")
                 writer.log_scalar(f"threshold/{name}", module._threshold, epoch)
+                # writer.log_scalar(f"tau/{name}", module.tau, epoch)
 
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
@@ -873,7 +880,7 @@ def main(args):
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
         for name, m in model.named_modules():
-            if isinstance(m, (Gate)):
+            if isinstance(m, (Gate, GateMoE)):
                 skip_ratio = m._skipped_tokens / m._total_tokens
                 writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
                 # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
@@ -894,6 +901,7 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
+    vis.savefig(args.epochs, save_to_file=True)
     writer.close()
 
 
