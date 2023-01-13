@@ -763,6 +763,7 @@ def main(args):
         writer=writer,
         args=args,
         skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
+        version=int(args.model[-1]) if args.model[-1].isdigit() else 1
     )
 
     print(f"Start training for {args.epochs} epochs")
