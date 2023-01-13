@@ -340,10 +340,13 @@ class GateSummarizer(nn.Module):  # gate that summarizes tokens by groups
 
         grouping_idx = self.grouping_curve_poly_linear(x, threshold, threshold * 0.7)  # follows curve, range is [0, threshold)
         # grouping_idx = self.grouping_curve_poly(x, threshold)  # follows curve, range is [0, threshold)
+        grouping_counts = th.zeros((B, density), device=x.device).scatter_add_(dim=1, index=grouping_idx, src=th.ones((B, T), device=x.device)).unsqueeze(-1)  # number of tokens in each group
         grouping_idx = th.gather(grouping_idx, dim=1, index=idx).unsqueeze(-1).expand(-1, -1, D)  # compose indices
 
         grouped_tokens = th.zeros((B, density, D), device=x.device, dtype=x.dtype)
         grouped_tokens = grouped_tokens.scatter_add_(dim=1, index=grouping_idx, src=x)  # add our tokens according to summary groups
+
+        grouped_tokens /= th.sqrt(grouping_counts)  # divide by square root of number of tokens sent to each summary token to preserve stdev
 
         return grouped_tokens, grouping_idx
 

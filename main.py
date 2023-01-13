@@ -782,6 +782,7 @@ def main(args):
                 args.epochs - offset_end,
             )
             # i += 1
+    
     # module.disable = True
     # print(delta)
     for epoch in range(args.start_epoch, args.epochs):
@@ -834,7 +835,6 @@ def main(args):
                 # module.disable = False
                 module.step(delta[name][0])
                 torch.cuda.reset_peak_memory_stats()
-                # print(f"{name=} {module._threshold}")
                 writer.log_scalar(f"threshold/{name}", module._threshold, epoch)
 
         print(
