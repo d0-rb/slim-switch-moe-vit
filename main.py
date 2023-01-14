@@ -465,6 +465,13 @@ def get_args_parser():
     )
     parser.add_argument("--vis-enabled", action="store_true")
 
+    parser.add_argument(
+        "--eval-threshold-step",
+        default=0.05,
+        type=float,
+        help="steps when evaluating model at different thresholds",
+    )
+
     return parser
 
 
@@ -515,8 +522,6 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-
-    # TODO: replace this with get_split_cifar100 ?
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
@@ -748,11 +753,22 @@ def main(args):
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
         lr_scheduler.step(args.start_epoch)
-    if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
-        print(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-        )
+    if args.eval:  # TODO: loop thru different thresholds for moe
+        current_thresh = args.starting_threeshold
+        while current_thresh <= args.target_threshold:
+            for name, module in model_without_ddp.named_modules():
+                if name in delta:
+                    module._threshold.data.copy_(
+                        current_thresh  # type: ignore[call-overload]
+                    )  # type: ignore[operator]
+                    torch.cuda.reset_peak_memory_stats()
+
+            test_stats = evaluate(data_loader_val, model, device)
+            print(
+                f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+            )
+
+            current_thresh += args.eval_threshold_step
         return
 
     vis = utils.TokenSkipVisualizer(
