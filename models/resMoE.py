@@ -68,13 +68,15 @@ class Gate(nn.Module):
         starting_threshold: float = 1.0,
         is_hard: float = True,
         add_guass_noise: bool = False,
+        keep_prev_mask=False,
     ):
 
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        self.head = nn.Linear(in_dim, 1)
+        self.head = nn.Linear(in_dim, 1) if not keep_prev_mask else nn.Identity()
         self.register_buffer("_threshold", th.tensor(starting_threshold))
         self.register_buffer("threshold", th.tensor(target_threshold))
+        self.register_buffer("tau", th.tensor(tau))
 
         self._total_tokens = 0
         self._skipped_tokens = 0
@@ -83,10 +85,16 @@ class Gate(nn.Module):
         self.disable = False
         self.tk_idx = None
         self.add_guass_noise = add_guass_noise
-        self.tau = tau
+        self.keep_prev_mask = keep_prev_mask
 
     def step(self, threshold: th.Tensor):
         self._threshold.data.copy_(threshold)
+
+    def step_tau(self, delta: th.Tensor):
+        tau = self.tau - delta
+        self.tau.data.copy_(
+            max(tau, 0.0)  # type: ignore[call-overload]
+        )  # type: ignore[operator]
 
     def forward(
         self, x: th.Tensor
@@ -103,10 +111,14 @@ class Gate(nn.Module):
 
         threshold = self._threshold  # if self.training else self.threshold
         density = int(x.size(1) * threshold)  # type: ignore[operator]
-        logits = self.head(self.dropout(x)).squeeze()  # (B x Token x 1)
 
-        if self.training and self.add_guass_noise:
-            logits = logits + th.rand_like(logits) / self.tau
+        if self.keep_prev_mask:
+            logits = th.zeros(x.size(0), x.size(1)).to(x.device)
+            logits[:, 0:density] = 1.0
+        else:
+            logits = self.head(self.dropout(x)).squeeze()  # (B x Token x 1)
+            if self.training and self.add_guass_noise:
+                logits = logits + th.rand_like(logits) * self.tau
 
         # prob = th.sigmoid(out)
 
@@ -133,8 +145,8 @@ class Gate(nn.Module):
             self.gate_attn = th.cat(
                 [values_tk, values_skip_tk.mean(dim=-1, keepdim=True)], dim=-1
             )
-
             self._skipped_tokens += math.prod(index.shape)
+
         self._total_tokens += math.prod(x.shape[0:2])
 
         return tokens, skip_tokens, summary_token, summary_skip_token
@@ -160,6 +172,7 @@ class GateMoE(nn.Module):
         target_threshold: float,
         is_clk_tk: bool,
         is_dist_tk: bool,
+        disable: bool = False,
     ):
         super().__init__()
         self.register_buffer("_threshold", th.tensor(starting_threshold))
@@ -198,7 +211,9 @@ class GateMoE(nn.Module):
         density = int(x.size(1) * threshold)  # type: ignore[operator]
 
         logits = (
-            self.attn_blk.x_cls_attn.mean(dim=1)[:, self.patch_idx : x.size(1) + 1]
+            self.attn_blk.x_cls_attn.mean(dim=1)[
+                :, self.patch_idx : x.size(1) + self.patch_idx
+            ]
             .detach()
             .clone()
         )
@@ -417,6 +432,13 @@ def forward_residule_moe_w_attn_loss_v2(self, x):
 
     fwded_tokens += tokens_to_fwd[:, 0 : fwded_tokens.size(1)]
 
+    if skip_tk_mlp is not None:
+        update_skip_tk_2 = skip_tk_mlp + summary_skip_token_mlp_half.tile(
+            skip_tk_mlp.size(1)
+        ).view(skip_tk_mlp.shape)
+
+        fwded_tokens = th.cat((fwded_tokens, update_skip_tk_2), dim=1)
+
     if skip_tk_attn is not None:  # and summary_skip_token is not None:
         update_skip_tk_1 = (
             skip_tk_attn
@@ -426,13 +448,6 @@ def forward_residule_moe_w_attn_loss_v2(self, x):
             )
         )
         fwded_tokens = th.cat((fwded_tokens, update_skip_tk_1), dim=1)
-
-    if skip_tk_mlp is not None:
-        update_skip_tk_2 = skip_tk_mlp + summary_skip_token_mlp_half.tile(
-            skip_tk_mlp.size(1)
-        ).view(skip_tk_mlp.shape)
-
-        fwded_tokens = th.cat((fwded_tokens, update_skip_tk_2), dim=1)
 
     if hasattr(self.attn, "x_cls_attn"):
         cls_attn = self.attn.x_cls_attn.mean(dim=1)  # mean over all heads
@@ -682,7 +697,249 @@ def mask_and_forward(
 
 
 from .model import deit_tiny_patch16_224
+from .model import deit_small_patch16_224
 from .model import deit_tiny_distilled_patch16_224
+
+
+@register_model
+def resmoe_small_patch16_224_expert8_attn_loss_v4_delay_start(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_small_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 384
+    depth = 12
+    num_heads = 6
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    moe_placement = [-1, -1, -1, -1, 1, 0, 1, 0, 1, 0, 1, 0]
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+
+            is_moe = moe_placement.pop(0)
+            if is_moe == -1:
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            else:
+                module.dense_gate = Gate(
+                    embed_dim,
+                    1.0,
+                    dropout=0.0,
+                    starting_threshold=starting_threshold_dense,
+                    target_threshold=target_threshold_dense,
+                )
+
+                module.moe_gate = GateMoE(
+                    module.attn,
+                    starting_threshold=starting_threshold_moe,
+                    target_threshold=target_threshold_moe,
+                    is_clk_tk=True,
+                    is_dist_tk=False,
+                )
+                if is_moe:
+                    module.mlp = CustomizedMoEMLP(
+                        embed_dim,
+                        embed_dim * mlp_ratio,
+                        moe_num_experts=8,
+                        moe_top_k=2,
+                        drop=drop_rate,
+                    )
+                module.is_cls_token = True
+                module.is_dist_token = False
+                bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                    module, module.__class__
+                )
+                setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def resmoe_tiny_patch16_224_expert8_attn_loss_v4_delay_start(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    moe_placement = [-1, -1, -1, -1, 1, 0, 1, 0, 1, 0, 1, 0]
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+
+            is_moe = moe_placement.pop(0)
+            if is_moe == -1:
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            else:
+                module.dense_gate = Gate(
+                    embed_dim,
+                    1.0,
+                    dropout=0.0,
+                    starting_threshold=starting_threshold_dense,
+                    target_threshold=target_threshold_dense,
+                )
+
+                module.moe_gate = GateMoE(
+                    module.attn,
+                    starting_threshold=starting_threshold_moe,
+                    target_threshold=target_threshold_moe,
+                    is_clk_tk=True,
+                    is_dist_tk=False,
+                )
+                if is_moe:
+                    module.mlp = CustomizedMoEMLP(
+                        embed_dim,
+                        embed_dim * mlp_ratio,
+                        moe_num_experts=8,
+                        moe_top_k=2,
+                        drop=drop_rate,
+                    )
+                module.is_cls_token = True
+                module.is_dist_token = False
+                bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                    module, module.__class__
+                )
+                setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def resmoe_tiny_patch16_224_expert8_attn_loss_v4_keepmask(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    moe_placement = [1, 0] * (depth // 2)
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            is_moe = bool(moe_placement.pop(0))
+            module.dense_gate = Gate(
+                embed_dim,
+                1.0,
+                dropout=0.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+                add_guass_noise=False,
+                keep_prev_mask=not is_moe,
+            )
+
+            module.moe_gate = GateMoE(
+                module.attn,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+                is_clk_tk=True,
+                is_dist_tk=False,
+                # disable=not is_moe,
+            )
+            if is_moe:
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                module, module.__class__
+            )
+            setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def resmoe_tiny_patch16_224_expert8_attn_loss_v4_noisy(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 192
+    depth = 12
+    num_heads = 3
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    moe_placement = [0, 1] * (depth // 2)
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.dense_gate = Gate(
+                embed_dim,
+                1.0,
+                dropout=0.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+                add_guass_noise=True,
+            )
+
+            module.moe_gate = GateMoE(
+                module.attn,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+                is_clk_tk=True,
+                is_dist_tk=False,
+                disable=moe_placement[0] == 0,
+            )
+            if moe_placement.pop(0):
+
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                module, module.__class__
+            )
+            setattr(module, "forward", bound_method)
+    return model
 
 
 @register_model

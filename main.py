@@ -459,12 +459,6 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--gate-lr",
-        default=1e-4,
-        type=float,
-        help="set learning for skip gates apart from the rest of our model",
-    )
-    parser.add_argument(
         "--gate-epoch-starting-offset",
         default=10,
         type=float,
@@ -477,6 +471,9 @@ def get_args_parser():
         help="num epoch apart in which gate will start to train",
     )
     parser.add_argument("--vis-enabled", action="store_true")
+    parser.add_argument(
+        "--gate-lr", default=None, type=float, help="[DEPRECATED] use --lr instead"
+    )
 
     return parser
 
@@ -677,7 +674,7 @@ def main(args):
                 base_params.append(param)
         ret = [
             {"params": base_params},
-            {"params": gate_params, "lr": args.gate_lr},
+            {"params": gate_params, "lr": args.lr},
         ]
         return ret
 
@@ -820,6 +817,7 @@ def main(args):
         writer=writer,
         args=args,
         skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
+        version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
     )
 
     print(f"Start training for {args.epochs} epochs")
@@ -940,6 +938,7 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
+    vis.savefig(args.epochs, save_to_file=True)
     writer.close()
 
 
