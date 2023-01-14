@@ -348,7 +348,7 @@ def get_args_parser():
     parser.add_argument(
         "--data-set",
         default="IMNET",
-        choices=["CIFAR100", "CIFAR10", "IMNET", "INAT", "INAT19"],
+        choices=["CIFAR100", "CIFAR10", "IMNET", "MINI-IMNET", "INAT", "INAT19"],
         type=str,
         help="Image Net dataset path",
     )
@@ -416,6 +416,13 @@ def get_args_parser():
         ],
         type=str,
         help="threshold scheduler",
+    )
+    parser.add_argument(
+        "--threshold-warmup-epochs",
+        type=int,
+        default=10,
+        metavar="N",
+        help="epochs to warmup threshold, if scheduler supports",
     )
     parser.add_argument(
         "--starting-threshold",
@@ -707,13 +714,13 @@ def main(args):
     # for threshold_optimizer in threshold_optimizers:
     if args.threshold_scheduler == "cosine":
         threshold_schedulers["dense"] = CosineAnnealingLRWarmup(threshold_optimizers["dense"],
-                                                          T_max=args.epochs,
-                                                          warmup_steps=10,
+                                                          T_max=args.epochs-1,
+                                                          warmup_steps=args.threshold_warmup_epochs,
                                                           eta_min=args.target_threshold_dense,
                                                           last_epoch=-1)
         threshold_schedulers["moe"] = CosineAnnealingLRWarmup(threshold_optimizers["moe"],
-                                                      T_max=args.epochs,
-                                                      warmup_steps=10,
+                                                      T_max=args.epochs-1,
+                                                      warmup_steps=args.threshold_warmup_epochs,
                                                       eta_min=args.target_threshold_moe,
                                                       last_epoch=-1)
     elif args.threshold_scheduler == "linear":
@@ -828,18 +835,6 @@ def main(args):
         torch.cuda.reset_peak_memory_stats()
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-        threshold["dense"] = threshold_schedulers["dense"].step(epoch)
-        writer.log_scalar("train/thresholds/dense", threshold["dense"], epoch)
-        threshold["moe"] = threshold_schedulers["moe"].step(epoch)
-        writer.log_scalar("train/thresholds/gate", threshold["moe"], epoch)
-
-        for name, module in model.named_modules():
-            if name.endswith("dense_gate"):
-                module.step(threshold["dense"][0])
-                writer.log_scalar(f"threshold/{name}", threshold["dense"], epoch)
-            elif name.endswith("moe_gate"):
-                module.step(threshold["moe"][0])
-                writer.log_scalar(f"threshold/{name}", threshold["moe"], epoch)
 
         train_stats = train_one_epoch(
             model,
@@ -855,6 +850,21 @@ def main(args):
             set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
             args=args,
         )
+
+        threshold["dense"] = threshold_schedulers["dense"].step(epoch)
+        writer.log_scalar("train/thresholds/dense", threshold["dense"], epoch)
+        threshold["moe"] = threshold_schedulers["moe"].step(epoch)
+        writer.log_scalar("train/thresholds/gate", threshold["moe"], epoch)
+        # thres = threshold["dense"]
+        # print(f"epoch: {epoch}, threshold: {thres}")
+
+        for name, module in model.named_modules():
+            if name.endswith("dense_gate"):
+                module.step(threshold["dense"][0])
+                writer.log_scalar(f"threshold/{name}", threshold["dense"], epoch)
+            elif name.endswith("moe_gate"):
+                module.step(threshold["moe"][0])
+                writer.log_scalar(f"threshold/{name}", threshold["moe"], epoch)
 
         lr_scheduler.step(epoch)
         writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)

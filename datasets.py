@@ -139,6 +139,10 @@ def build_dataset(is_train, args):
         root = os.path.join(args.data_path, "train" if is_train else "val")
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
+    elif args.data_set == "MINI-IMNET":
+        root = os.path.join(args.data_path, "train" if is_train else "val")
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = 100
     elif args.data_set == "INAT":
         dataset = INatDataset(
             args.data_path,
