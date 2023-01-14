@@ -33,11 +33,11 @@ from datasets import build_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from models.resMoE import Gate
+from models.resMoE import Gate, GateMoE
 from samplers import RASampler
 from utils import TensorboardXTracker
 from torch.optim.optimizer import Optimizer
-from threshold_scheduler import LinearLR, CosineAnnealingLR
+from threshold_scheduler import LinearLR, CosineAnnealingLR, CosineAnnealingLRWarmup
 
 # import models_v2
 
@@ -709,12 +709,14 @@ def main(args):
     threshold_schedulers = {}
     # for threshold_optimizer in threshold_optimizers:
     if args.threshold_scheduler == "cosine":
-        threshold_schedulers["dense"] = CosineAnnealingLR(threshold_optimizers["dense"],
+        threshold_schedulers["dense"] = CosineAnnealingLRWarmup(threshold_optimizers["dense"],
                                                           T_max=args.epochs,
+                                                          warmup_steps=10,
                                                           eta_min=args.target_threshold_dense,
                                                           last_epoch=-1)
-        threshold_schedulers["moe"] = CosineAnnealingLR(threshold_optimizers["moe"],
+        threshold_schedulers["moe"] = CosineAnnealingLRWarmup(threshold_optimizers["moe"],
                                                       T_max=args.epochs,
+                                                      warmup_steps=10,
                                                       eta_min=args.target_threshold_moe,
                                                       last_epoch=-1)
     elif args.threshold_scheduler == "linear":
@@ -876,7 +878,7 @@ def main(args):
                     checkpoint_path,
                 )
 
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device, args)
 
         writer.log_scalar(
             "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
@@ -917,7 +919,7 @@ def main(args):
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
         for name, m in model.named_modules():
-            if isinstance(m, (Gate)):
+            if isinstance(m, (Gate)) or isinstance(m, (GateMoE)):
                 skip_ratio = m._skipped_tokens / m._total_tokens
                 writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
                 # writer.log_scalar(f"grad/{name}", train_stats[name], epoch)

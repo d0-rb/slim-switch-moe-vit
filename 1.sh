@@ -17,5 +17,5 @@ CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model ${MODEL} --data-set CIFAR10 
                 --unscale-lr --no-repeated-aug --aa rand-m9-mstd0.5-inc1 --threshold-scheduler cosine \
                 --starting-threshold-dense ${START_THRESHOLD_DENSE} --target-threshold-dense ${TARGET_THRESHOLD_DENSE} \
                 --starting-threshold-moe ${START_THRESHOLD_MOE} --target-threshold-moe ${TARGET_THRESHOLD_MOE} \
-                --output_dir logs/test --warmup-epochs 5 --gate-lr ${LR}
-#                --output_dir logs/cifar10/${MODEL}/scratch/lr_${LR}_ep_${EPOCH}/cosine_thres/dense_${START_THRESHOLD_DENSE}_${TARGET_THRESHOLD_DENSE}/moe_${START_THRESHOLD_MOE}_${TARGET_THRESHOLD_MOE}/${SEED} \
+                --warmup-epochs 5 --gate-lr ${LR} \
+                --output_dir logs/cifar10/${MODEL}/scratch/lr_${LR}_ep_${EPOCH}/cosine_thres/dense_${START_THRESHOLD_DENSE}_${TARGET_THRESHOLD_DENSE}/moe_${START_THRESHOLD_MOE}_${TARGET_THRESHOLD_MOE}/${SEED}

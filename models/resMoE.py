@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from fmoe import FMoETransformerMLP  # type: ignore[import]
 from timm.models import register_model  # type: ignore[import]
 from torch.autograd import Variable
+import torch
 
 from .model import DistilledVisionTransformer as Deit
 from .vision_transformer import Block
@@ -665,7 +666,7 @@ def mask_and_forward(
     )
 
     tokens_fwd = fwd_fn(tokens)  # + tokens
-    if summary_token:
+    if torch.any(summary_token):
         tokens_fwd = tokens_fwd[:, 0:-1]
 
     if skip_tk is not None and summary_skip_token is not None:
