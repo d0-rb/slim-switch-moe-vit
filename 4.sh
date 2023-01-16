@@ -1,7 +1,9 @@
 #!/bin/bash
 
+PORT=$((9000+$RANDOM%1000))
 MODEL=resmoe_tiny_patch16_224_expert8_attn_loss_v4_delay_start
-CUDA=1
+CUDA="4,5,6,7"
+NUM_CUDA=4
 SEED=0
 START_THRESHOLD_DENSE=0.9
 TARGET_THRESHOLD_DENSE=0.5
@@ -11,8 +13,8 @@ THRES_WARM=10
 LR=3e-4
 EPOCH=400
 
-
-CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model ${MODEL} --data-set IMNET100 --data-path dataset/ImageNet100 --batch 156 \
+CUDA_VISIBLE_DEVICES=$CUDA python -m torch.distributed.launch --nproc_per_node=${NUM_CUDA} --master_port=${PORT} --use_env main.py \
+                --model ${MODEL} --data-set IMNET100 --data-path dataset/ImageNet100 --batch 128 \
                 --lr ${LR} --epochs ${EPOCH} --weight-decay 0.05 --sched cosine --input-size 224 \
                 --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --drop 0.0 \
                 --seed ${SEED} --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \

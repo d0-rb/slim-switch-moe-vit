@@ -348,7 +348,7 @@ def get_args_parser():
     parser.add_argument(
         "--data-set",
         default="IMNET",
-        choices=["CIFAR100", "CIFAR10", "IMNET", "MINI-IMNET", "INAT", "INAT19"],
+        choices=["CIFAR100", "CIFAR10", "IMNET", "IMNET100", "INAT", "INAT19"],
         type=str,
         help="Image Net dataset path",
     )

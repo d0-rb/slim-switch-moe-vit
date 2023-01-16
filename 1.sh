@@ -12,7 +12,7 @@ LR=3e-4
 EPOCH=400
 
 
-CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model ${MODEL} --data-set MINI-IMNET --data-path dataset/mini-imagenet --batch 156 \
+CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model ${MODEL} --data-set IMNET100 --data-path dataset/ImageNet100 --batch 156 \
                 --lr ${LR} --epochs ${EPOCH} --weight-decay 0.05 --sched cosine --input-size 224 \
                 --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --drop 0.0 \
                 --seed ${SEED} --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \
@@ -20,4 +20,4 @@ CUDA_VISIBLE_DEVICES=${CUDA} python main.py --model ${MODEL} --data-set MINI-IMN
                 --starting-threshold-dense ${START_THRESHOLD_DENSE} --target-threshold-dense ${TARGET_THRESHOLD_DENSE} \
                 --starting-threshold-moe ${START_THRESHOLD_MOE} --target-threshold-moe ${TARGET_THRESHOLD_MOE} \
                 --warmup-epochs 5 --gate-lr ${LR} --threshold-warmup-epochs ${THRES_WARM} \
-                --output_dir logs/mini-imnet/${MODEL}/scratch/lr_${LR}_ep_${EPOCH}/cosine_thres_warm_${THRES_WARM}/dense_${START_THRESHOLD_DENSE}_${TARGET_THRESHOLD_DENSE}/moe_${START_THRESHOLD_MOE}_${TARGET_THRESHOLD_MOE}/${SEED}
+                --output_dir logs/imnet100/${MODEL}/scratch/lr_${LR}_ep_${EPOCH}/cosine_thres_warm_${THRES_WARM}/dense_${START_THRESHOLD_DENSE}_${TARGET_THRESHOLD_DENSE}/moe_${START_THRESHOLD_MOE}_${TARGET_THRESHOLD_MOE}/${SEED}
