@@ -24,6 +24,7 @@ from timm.scheduler import create_scheduler  # type: ignore[import]
 from timm.utils import get_state_dict  # type: ignore[import]
 from timm.utils import ModelEma  # type: ignore[import]
 from timm.utils import NativeScaler  # type: ignore[import]
+from torch.optim.optimizer import Optimizer
 from torch.utils.tensorboard import SummaryWriter
 
 import models
@@ -33,11 +34,13 @@ from datasets import build_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from models.resMoE import Gate, GateMoE
+from models.resMoE import Gate
+from models.resMoE import GateMoE
 from samplers import RASampler
+from threshold_scheduler import CosineAnnealingLR
+from threshold_scheduler import CosineAnnealingLRWarmup
+from threshold_scheduler import LinearLR
 from utils import TensorboardXTracker
-from torch.optim.optimizer import Optimizer
-from threshold_scheduler import LinearLR, CosineAnnealingLR, CosineAnnealingLRWarmup
 
 # import models_v2
 
@@ -696,33 +699,49 @@ def main(args):
 
     threshold_optimizers = {}
     if args.threshold_scheduler == "cosine":
-        threshold_optimizers["dense"] = Optimizer(params=[{"params": []}], defaults={"lr": args.starting_threshold_dense})
-        threshold_optimizers["moe"] = Optimizer(params=[{"params": []}], defaults={"lr": args.starting_threshold_moe})
+        threshold_optimizers["dense"] = Optimizer(
+            params=[{"params": []}], defaults={"lr": args.starting_threshold_dense}
+        )
+        threshold_optimizers["moe"] = Optimizer(
+            params=[{"params": []}], defaults={"lr": args.starting_threshold_moe}
+        )
     elif args.threshold_scheduler == "linear":
-        threshold_optimizers["dense"] = Optimizer(params=[{"params": []}], defaults={"lr": args.target_threshold_dense})
-        threshold_optimizers["moe"] = Optimizer(params=[{"params": []}], defaults={"lr": args.target_threshold_moe})
+        threshold_optimizers["dense"] = Optimizer(
+            params=[{"params": []}], defaults={"lr": args.target_threshold_dense}
+        )
+        threshold_optimizers["moe"] = Optimizer(
+            params=[{"params": []}], defaults={"lr": args.target_threshold_moe}
+        )
     threshold_schedulers = {}
     # for threshold_optimizer in threshold_optimizers:
     if args.threshold_scheduler == "cosine":
-        threshold_schedulers["dense"] = CosineAnnealingLRWarmup(threshold_optimizers["dense"],
-                                                          T_max=args.epochs-1,
-                                                          warmup_steps=args.threshold_warmup_epochs,
-                                                          eta_min=args.target_threshold_dense,
-                                                          last_epoch=-1)
-        threshold_schedulers["moe"] = CosineAnnealingLRWarmup(threshold_optimizers["moe"],
-                                                      T_max=args.epochs-1,
-                                                      warmup_steps=args.threshold_warmup_epochs,
-                                                      eta_min=args.target_threshold_moe,
-                                                      last_epoch=-1)
+        threshold_schedulers["dense"] = CosineAnnealingLRWarmup(
+            threshold_optimizers["dense"],
+            T_max=args.epochs - 1,
+            warmup_steps=args.threshold_warmup_epochs,
+            eta_min=args.target_threshold_dense,
+            last_epoch=-1,
+        )
+        threshold_schedulers["moe"] = CosineAnnealingLRWarmup(
+            threshold_optimizers["moe"],
+            T_max=args.epochs - 1,
+            warmup_steps=args.threshold_warmup_epochs,
+            eta_min=args.target_threshold_moe,
+            last_epoch=-1,
+        )
     elif args.threshold_scheduler == "linear":
-        threshold_schedulers["dense"] = LinearLR(threshold_optimizers["dense"],
-                                                 start_factor=args.starting_threshold_dense/args.target_threshold_dense,
-                                                 end_factor=1.0,
-                                                 total_iters=args.epochs)
-        threshold_schedulers["moe"] = LinearLR(threshold_optimizers["moe"],
-                                               start_factor=args.starting_threshold_moe/args.target_threshold_moe,
-                                               end_factor=1.0,
-                                               total_iters=args.epochs)
+        threshold_schedulers["dense"] = LinearLR(
+            threshold_optimizers["dense"],
+            start_factor=args.starting_threshold_dense / args.target_threshold_dense,
+            end_factor=1.0,
+            total_iters=args.epochs,
+        )
+        threshold_schedulers["moe"] = LinearLR(
+            threshold_optimizers["moe"],
+            start_factor=args.starting_threshold_moe / args.target_threshold_moe,
+            end_factor=1.0,
+            total_iters=args.epochs,
+        )
     else:
         NotImplementedError
 
