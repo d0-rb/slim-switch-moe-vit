@@ -371,7 +371,7 @@ class TokenSkipVisualizer:
 
         if global_rank != 0:
             return
-        if not version in (1, 2, 4):
+        if not version in (1, 2, 4, 8):
             raise ValueError(
                 f"resmoe version for tokenskipvisualizer must be 1, 2 or 4, but got {version}"
             )
@@ -495,7 +495,7 @@ class TokenSkipVisualizer:
             masked_img = make_grid(masked_img)
 
             self.writer.add_tk_skp_vis(
-                depth, name, masked_img, self.step, self._save_to_file
+                depth, name, masked_img, self.step
             )
 
         return gate_hook
@@ -577,7 +577,7 @@ class TokenSkipVisualizer:
             masked_img = make_grid(masked_img)
 
             self.writer.add_tk_skp_vis(
-                depth, name, masked_img, self.step, self._save_to_file
+                depth, name, masked_img, self.step
             )
 
         return gate_hook

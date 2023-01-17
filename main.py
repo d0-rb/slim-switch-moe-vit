@@ -33,10 +33,11 @@ from datasets import build_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from models.resMoE import Gate
-from models.resMoE import GateMoE
+from models.resMoE import Gate, GateMoE
 from samplers import RASampler
 from utils import TensorboardXTracker
+from torch.optim.optimizer import Optimizer
+from threshold_scheduler import LinearLR, CosineAnnealingLR, CosineAnnealingLRWarmup
 
 # import models_v2
 
@@ -82,6 +83,7 @@ def get_args_parser():
     parser.add_argument(
         "--model-ema-force-cpu", action="store_true", default=False, help=""
     )
+    parser.add_argument("--debug", action="store_true")
 
     # Optimizer parameters
     parser.add_argument(
@@ -346,7 +348,7 @@ def get_args_parser():
     parser.add_argument(
         "--data-set",
         default="IMNET",
-        choices=["CIFAR100", "CIFAR10", "IMNET", "INAT", "INAT19"],
+        choices=["CIFAR100", "CIFAR10", "IMNET", "IMNET100", "INAT", "INAT19"],
         type=str,
         help="Image Net dataset path",
     )
@@ -405,6 +407,23 @@ def get_args_parser():
         "--dist_url", default="env://", help="url used to set up distributed training"
     )
 
+    parser.add_argument(
+        "--threshold-scheduler",
+        default="cosine",
+        choices=[
+            "linear",
+            "cosine",
+        ],
+        type=str,
+        help="threshold scheduler",
+    )
+    parser.add_argument(
+        "--threshold-warmup-epochs",
+        type=int,
+        default=10,
+        metavar="N",
+        help="epochs to warmup threshold, if scheduler supports",
+    )
     parser.add_argument(
         "--starting-threshold",
         default=None,
@@ -675,11 +694,41 @@ def main(args):
         model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
     )
 
+    threshold_optimizers = {}
+    if args.threshold_scheduler == "cosine":
+        threshold_optimizers["dense"] = Optimizer(params=[{"params": []}], defaults={"lr": args.starting_threshold_dense})
+        threshold_optimizers["moe"] = Optimizer(params=[{"params": []}], defaults={"lr": args.starting_threshold_moe})
+    elif args.threshold_scheduler == "linear":
+        threshold_optimizers["dense"] = Optimizer(params=[{"params": []}], defaults={"lr": args.target_threshold_dense})
+        threshold_optimizers["moe"] = Optimizer(params=[{"params": []}], defaults={"lr": args.target_threshold_moe})
+    threshold_schedulers = {}
+    # for threshold_optimizer in threshold_optimizers:
+    if args.threshold_scheduler == "cosine":
+        threshold_schedulers["dense"] = CosineAnnealingLRWarmup(threshold_optimizers["dense"],
+                                                          T_max=args.epochs-1,
+                                                          warmup_steps=args.threshold_warmup_epochs,
+                                                          eta_min=args.target_threshold_dense,
+                                                          last_epoch=-1)
+        threshold_schedulers["moe"] = CosineAnnealingLRWarmup(threshold_optimizers["moe"],
+                                                      T_max=args.epochs-1,
+                                                      warmup_steps=args.threshold_warmup_epochs,
+                                                      eta_min=args.target_threshold_moe,
+                                                      last_epoch=-1)
+    elif args.threshold_scheduler == "linear":
+        threshold_schedulers["dense"] = LinearLR(threshold_optimizers["dense"],
+                                                 start_factor=args.starting_threshold_dense/args.target_threshold_dense,
+                                                 end_factor=1.0,
+                                                 total_iters=args.epochs)
+        threshold_schedulers["moe"] = LinearLR(threshold_optimizers["moe"],
+                                               start_factor=args.starting_threshold_moe/args.target_threshold_moe,
+                                               end_factor=1.0,
+                                               total_iters=args.epochs)
+    else:
+        NotImplementedError
+
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
-
-    criterion = LabelSmoothingCrossEntropy()
 
     if mixup_active:
         # smoothing is handled with mixup label transform
@@ -783,29 +832,9 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
-
-    delta: typ.Dict[str, typ.Tuple[float, int, int]] = {}
-    delta_noise: typ.Dict[str, typ.Tuple[float, int, int]] = {}
-    offset_start = args.gate_epoch_starting_offset
-    offset_end = args.gate_epoch_ending_offset
-    # i = 0
-    for name, module in model.named_modules():
-        if isinstance(module, (Gate, GateMoE)):
-            delta[name] = (
-                (module._threshold - module.threshold)
-                / (args.epochs - offset_start - offset_end),
-                offset_start,
-                args.epochs - offset_end,
-            )
-            # delta_noise[name] = (
-            # (module.tau) / (args.epochs - offset_start - offset_end),
-            # offset_start,
-            # args.epochs - offset_end,
-            # )
-            # i += 1
-    # module.disable = True
-    # print(delta)
+    threshold = {}
     for epoch in range(args.start_epoch, args.epochs):
+        torch.cuda.reset_peak_memory_stats()
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
@@ -823,6 +852,19 @@ def main(args):
             set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
             args=args,
         )
+
+        threshold["dense"] = threshold_schedulers["dense"].step(epoch)
+        writer.log_scalar("train/thresholds/dense", threshold["dense"], epoch)
+        threshold["moe"] = threshold_schedulers["moe"].step(epoch)
+        writer.log_scalar("train/thresholds/gate", threshold["moe"], epoch)
+
+        for name, module in model.named_modules():
+            if name.endswith("dense_gate"):
+                module.step(threshold["dense"][0])
+                writer.log_scalar(f"threshold/{name}", threshold["dense"], epoch)
+            elif name.endswith("moe_gate"):
+                module.step(threshold["moe"][0])
+                writer.log_scalar(f"threshold/{name}", threshold["moe"], epoch)
 
         lr_scheduler.step(epoch)
         writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
@@ -844,21 +886,11 @@ def main(args):
                     checkpoint_path,
                 )
 
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device, args)
 
         writer.log_scalar(
             "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
         )
-
-        for name, module in model.named_modules():
-            if name in delta and epoch >= delta[name][1] and epoch < delta[name][-1]:
-                # module.disable = False
-                module.step(delta[name][0])
-                # module.step_tau(delta_noise[name][0])
-                torch.cuda.reset_peak_memory_stats()
-                # print(f"{name=} {module._threshold}")
-                writer.log_scalar(f"threshold/{name}", module._threshold, epoch)
-                # writer.log_scalar(f"tau/{name}", module.tau, epoch)
 
         print(
             f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
@@ -892,7 +924,6 @@ def main(args):
                 vis.savefig(epoch)
 
         print(f"Max accuracy: {max_accuracy:.2f}%")
-        # writer.log_scalar("max_acc", max_accuracy, epoch)
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
         for name, m in model.named_modules():
