@@ -584,6 +584,7 @@ def mask_and_forward(
 
 from .model import deit_tiny_patch16_224
 from .model import deit_small_patch16_224
+from .model import deit_base_patch16_224
 from .model import deit_tiny_distilled_patch16_224
 
 
@@ -712,6 +713,113 @@ def resmoe_tiny_patch16_224_expert8_attn_loss_v4_delay_start(
                     module, module.__class__
                 )
                 setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def resmoe_base_patch16_224_expert8_attn_loss_v4(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_base_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 768
+    depth = 12
+    num_heads = 12
+    mlp_ratio = 4
+    drop_ratio = 0
+
+    moe_placement = [0, 1] * (depth // 2)
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.dense_gate = Gate(
+                embed_dim,
+                1.0,
+                dropout=0.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+            )
+
+            module.moe_gate = GateMoE(
+                module.attn,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+                is_clk_tk=True,
+                is_dist_tk=False,
+            )
+            if moe_placement.pop(0):
+
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                module, module.__class__
+            )
+            setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def resmoe_small_patch16_224_expert8_attn_loss_v4(
+    pretrained=False,
+    starting_threshold_dense=1.0,
+    target_threshold_dense=0.9,
+    starting_threshold_moe=1.0,
+    target_threshold_moe=0.9,
+    **kwargs,
+):
+    model = deit_small_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 384
+    depth = 12
+    num_heads = 6
+    mlp_ratio = 4
+    drop_rate = 0.0
+    moe_placement = [0, 1] * (depth // 2)
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.dense_gate = Gate(
+                embed_dim,
+                1.0,
+                dropout=0.0,
+                starting_threshold=starting_threshold_dense,
+                target_threshold=target_threshold_dense,
+            )
+
+            module.moe_gate = GateMoE(
+                module.attn,
+                starting_threshold=starting_threshold_moe,
+                target_threshold=target_threshold_moe,
+                is_clk_tk=True,
+                is_dist_tk=False,
+            )
+            if moe_placement.pop(0):
+
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            module.is_cls_token = True
+            module.is_dist_token = False
+            bound_method = forward_residule_moe_w_attn_loss_v2.__get__(
+                module, module.__class__
+            )
+            setattr(module, "forward", bound_method)
     return model
 
 
@@ -956,52 +1064,6 @@ def resmoe_tiny_patch16_224_expert8_attn_loss(
 
 
 @register_model
-def resmoe_tiny_distilled_patch16_224_expert8(
-    pretrained=False,
-    starting_threshold_dense=1.0,
-    target_threshold_dense=0.9,
-    starting_threshold_moe=1.0,
-    target_threshold_moe=0.9,
-    **kwargs,
-):
-    model = deit_tiny_distilled_patch16_224(pretrained=pretrained, **kwargs)
-    patch_size = 16
-    embed_dim = 192
-    depth = 12
-    num_heads = 3
-    mlp_ratio = 4
-    drop_rate = 0.0
-
-    for name, module in model.named_modules():
-        if isinstance(module, Block):
-            module.dense_gate = Gate(
-                embed_dim,
-                1.0,
-                starting_threshold=starting_threshold_dense,
-                target_threshold=target_threshold_dense,
-            )
-            module.moe_gate = Gate(
-                embed_dim,
-                1.0,
-                starting_threshold=starting_threshold_moe,
-                target_threshold=target_threshold_moe,
-            )
-
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=8,
-                moe_top_k=2,
-                drop=drop_rate,
-            )
-            module.is_cls_token = True
-            module.is_dist_token = True
-            bound_method = forward_residule_moe.__get__(module, module.__class__)
-            setattr(module, "forward", bound_method)
-    return model
-
-
-@register_model
 def resmoe_tiny_patch16_224_expert8(
     pretrained=False,
     starting_threshold_dense=1.0,
@@ -1044,6 +1106,50 @@ def resmoe_tiny_patch16_224_expert8(
             module.is_dist_token = False
             bound_method = forward_residule_moe.__get__(module, module.__class__)
             setattr(module, "forward", bound_method)
+    return model
+
+
+@register_model
+def moe_base_patch16_224_expert8(pretrained=False, **kwargs):
+    model = deit_base_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 768
+    depth = 12
+    num_heads = 12
+    mlp_ratio = 4
+    drop_ratio = 0
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.mlp = CustomizedMoEMLP(
+                embed_dim,
+                embed_dim * mlp_ratio,
+                moe_num_experts=8,
+                moe_top_k=2,
+                drop=drop_rate,
+            )
+    return model
+
+
+@register_model
+def moe_small_patch16_224_expert8(pretrained=False, **kwargs):
+    model = deit_small_patch16_224(pretrained=pretrained, **kwargs)
+    patch_size = 16
+    embed_dim = 384
+    depth = 12
+    num_heads = 6
+    mlp_ratio = 4
+    drop_rate = 0.0
+
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.mlp = CustomizedMoEMLP(
+                embed_dim,
+                embed_dim * mlp_ratio,
+                moe_num_experts=8,
+                moe_top_k=2,
+                drop=drop_rate,
+            )
     return model
 
 
