@@ -443,6 +443,11 @@ class TokenSkipVisualizer:
                 elif gate_name.endswith("moe_gate"):
                     vis_hook = moe_idx_vis_hook_generator(depth, gate_name)
 
+                if gate_name.endswith('dense_gate'):
+                    vis_hook = attn_idx_vis_hook_generator(depth, gate_name)
+                elif gate_name.endswith('moe_gate'):
+                    vis_hook = moe_idx_vis_hook_generator(depth, gate_name)
+
                 self.vis_gates.append((depth, gate_name))
                 gate.register_forward_hook(vis_hook)
 
@@ -574,6 +579,64 @@ class TokenSkipVisualizer:
             self.writer.add_tk_skp_vis(
                 depth, name, masked_img, self.step, self._save_to_file
             )
+
+        return gate_hook
+
+    def _moe_idx_vis_hook_v2(self, depth, name):
+        gate_tuple = (depth, name)
+
+        def gate_hook(gate, _x, output):
+            if not self.track_idx:
+                return
+
+            x = _x[0]  # get only positional argument
+            # x.shape (B, attended_tokens, dim)
+            B, T_attn, D = x.shape
+
+            num_attn_selected = gate.tk_idx.size(1)
+
+            indices = gate.tk_idx.detach().cpu()  # gate.tk_idx only maps from attn selected tokens to attn selected tokens
+            indices = torch.cat([indices, torch.arange(start=num_attn_selected, end=self.num_patches).expand(B, self.num_patches - num_attn_selected)], dim=1)  # identity mapping for unmapped tokens
+            self.indices.append(indices)
+
+            if not gate_tuple in self.vis_gates:
+                return
+
+            # if we are to output a visualization for this layer
+            num_spatial_selected = int(num_attn_selected * gate._threshold)
+
+            # total_idx.shape (B, Tokens) [first num_spatial_selected tokens along dim 1 are selected, rest are attn selected or skip]
+            total_idx = (
+                torch.arange(self.num_patches, device="cpu").unsqueeze(0).repeat((B, 1))
+            )  # final idx mapping made by composing everything in indexes
+            for index in self.indices:  # composing all index mappings
+                total_idx = torch.gather(total_idx, dim=1, index=index)
+
+            sel_idx = total_idx[:, :num_attn_selected]  # indices of attn selected tokens
+            tk_mask = torch.full((B, self.num_patches), self.skip_tk_brightness, dtype=torch.float)  # grid starts full darkened by default
+            tk_mask.scatter_(
+                dim=1, index=sel_idx, src=torch.ones_like(sel_idx, dtype=torch.float)
+            )  # place skip_tk_brightness on locations pointed to by indices (create attn selected tokens mask)
+
+            spatial_skip_idx = total_idx[:, num_spatial_selected:num_attn_selected].unsqueeze(1).expand(-1, 2, -1)  # indices of attn but not spatial selected tokens
+            
+            tk_mask = tk_mask.unsqueeze(1).repeat(1, 3, 1)
+            tk_mask[:, 1:, :].scatter_(
+                dim=2, index=spatial_skip_idx, src=torch.full_like(spatial_skip_idx, self.skip_tk_brightness, dtype=torch.float)
+            )  # place colored mask on tokens that were selected by attn but skipped by spatial
+
+            tk_mask = tk_mask.view(
+                B, 3, *self.grid_size
+            )  # tk_mask.shape (B, 3, H_patch, W_patch)
+            
+            img_mask = torch.kron(
+                tk_mask, torch.ones((1, 1, *self.patch_size))
+            )  # img_mask.shape (B, 3, H, W)
+
+            masked_img = img_mask * self.display_img
+            masked_img = make_grid(masked_img)
+
+            self.writer.add_tk_skp_vis(depth, name, masked_img, self.step)
 
         return gate_hook
 
