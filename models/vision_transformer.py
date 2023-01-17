@@ -275,7 +275,7 @@ class Attention(nn.Module):
         attn = self.attn_drop(attn)
 
         # if self.training:
-        self.x_cls_attn = attn[:, :, 0, :]  # [B x H x N x N]
+        self.x_cls_attn = attn[:, :, 0, :]  # [B x H x 1 x N]
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
