@@ -23,4 +23,4 @@ CUDA_VISIBLE_DEVICES=$cuda python3 -m torch.distributed.launch --nproc_per_node=
                 --unscale-lr --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
                 --starting-threshold-dense $start_threshold --target-threshold-dense $target_threshold \
                 --starting-threshold-moe $start_threshold --target-threshold-moe $target_threshold \
-                --output_dir logs/${dataset}/${MODEL}/scratch/lr_${LR}_ep_${EPOCH}/cosine_thres_warm_${THRES_WARM}/dense_${START_THRESHOLD_DENSE}_${TARGET_THRESHOLD_DENSE}/moe_${START_THRESHOLD_MOE}_${TARGET_THRESHOLD_MOE}/${SEED}
+                --output_dir logs/${dataset}/${model}/scratch/lr_${lr}_ep_${epoch}/cosine/dense_${start_threshold}_${target_threshold}/moe_${start_threshold}_${target_threshold}/${n}
