@@ -42,8 +42,6 @@ from threshold_scheduler import CosineAnnealingLRWarmup
 from threshold_scheduler import LinearLR
 from utils import TensorboardXTracker
 
-# import models_v2
-
 
 def get_args_parser():
     parser = argparse.ArgumentParser(

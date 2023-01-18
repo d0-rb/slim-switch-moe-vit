@@ -17,7 +17,6 @@ from .resMoE import GateMoE
 from .vision_transformer import Block
 
 
-
 class GateImnet(GateMoE):
     def __init__(self, embed_dim, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -37,7 +36,8 @@ class GateImnet(GateMoE):
         if x.size(1) - density > 0:
             skip_tokens = x[:, density::]
 
-            values = attn[:, density::].unsqueeze(dim=-1)
+            values = attn[:, density::].clone()
+            values = values.unsqueeze(dim=-1)
 
             summary_skip_token = self.norm(
                 (skip_tokens * values).sum(dim=1, keepdim=True)
@@ -239,12 +239,14 @@ def resmoe_tiny_patch16_224_expert8_imnet_v4(
 
     for name, module in model.named_modules():
         if isinstance(module, Block):
+            is_moe = moe_placement.pop(0)
             if index == 0:
                 print(f"{name=}")
                 index += 1
                 bound_method = forward_block_w_attn.__get__(module, module.__class__)
                 module._forward = forward_block_vanilla
                 setattr(module, "forward", bound_method)
+
             else:
                 module.dense_gate = GateImnet(
                     embed_dim,
@@ -263,7 +265,7 @@ def resmoe_tiny_patch16_224_expert8_imnet_v4(
                     is_clk_tk=True,
                     is_dist_tk=False,
                 )
-                if moe_placement.pop(0):
+                if is_moe:
 
                     module.mlp = CustomizedMoEMLP(
                         embed_dim,

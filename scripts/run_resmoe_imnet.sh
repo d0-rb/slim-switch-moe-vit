@@ -23,4 +23,4 @@ CUDA_VISIBLE_DEVICES=$cuda python main.py --model $model --data-set $dataset \
                 --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
                 --starting-threshold-dense $start_threshold --target-threshold-dense $target_threshold \
                 --starting-threshold-moe $start_threshold --target-threshold-moe $target_threshold \
-                --output_dir logs/${dataset}/${model}/scratch/lr_${lr}_ep_${epoch}/cosine/dense_${start_threshold}_${target_threshold}/moe_${start_threshold}_${target_threshold}/${n}
+                --output_dir logs/${dataset}/${model}/scratch/lr_${lr}_ep_${epoch}/cosine/dense_${start_threshold}_${target_threshold}/moe_${start_threshold}_${target_threshold}/${n} \
