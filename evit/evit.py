@@ -721,16 +721,18 @@ def moe_deit_tiny_patch16_224_shrink_base_expert8(
     num_heads = 3
     mlp_ratio = 4
     drop_rate = 0.0
-
+    index=0
     for name, module in model.named_modules():
         if isinstance(module, Mlp):
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=8,
-                moe_top_k=2,
-                drop=drop_rate,
-            )
+            if index % 2 == 0:
+                module.mlp = CustomizedMoEMLP(
+                    embed_dim,
+                    embed_dim * mlp_ratio,
+                    moe_num_experts=8,
+                    moe_top_k=2,
+                    drop=drop_rate,
+                )
+            index+=1
     return model
 
 
