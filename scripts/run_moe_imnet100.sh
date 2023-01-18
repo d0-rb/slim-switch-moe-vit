@@ -1,8 +1,8 @@
 #!/bin/bash
 cuda=5
-batchsize=1024
+batchsize=256
 model="moe_tiny_patch16_224_expert8"
-lr="3e-4"
+lr="3e-4" #"3e-4"
 start_threshold="0.9"
 target_threshold="0.5"
 datapath="~/DATASET/ImageNet100"

@@ -1,8 +1,8 @@
 #!/bin/bash
 cuda=4
-batchsize=1024
+batchsize=256
 model="resmoe_tiny_patch16_224_expert8_attn_loss_v4"
-lr="3e-4"
+lr="3e-4" #"3e-4"
 start_threshold="0.9"
 target_threshold="0.5"
 datapath="~/DATASET/ImageNet100"
