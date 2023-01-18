@@ -37,9 +37,7 @@ from losses import DistillationLoss
 from models.resMoE import Gate
 from models.resMoE import GateMoE
 from samplers import RASampler
-from threshold_scheduler import CosineAnnealingLR
-from threshold_scheduler import CosineAnnealingLRWarmup
-from threshold_scheduler import LinearLR
+from threshold_scheduler import CosineAnnealingLRWarmup, LinearLRWarmup
 from utils import TensorboardXTracker
 
 # import models_v2
@@ -713,7 +711,6 @@ def main(args):
             params=[{"params": []}], defaults={"lr": args.target_threshold_moe}
         )
     threshold_schedulers = {}
-    # for threshold_optimizer in threshold_optimizers:
     if args.threshold_scheduler == "cosine":
         threshold_schedulers["dense"] = CosineAnnealingLRWarmup(
             threshold_optimizers["dense"],
@@ -730,14 +727,16 @@ def main(args):
             last_epoch=-1,
         )
     elif args.threshold_scheduler == "linear":
-        threshold_schedulers["dense"] = LinearLR(
+        threshold_schedulers["dense"] = LinearLRWarmup(
             threshold_optimizers["dense"],
+            warmup_steps=args.threshold_warmup_epochs,
             start_factor=args.starting_threshold_dense / args.target_threshold_dense,
             end_factor=1.0,
             total_iters=args.epochs,
         )
-        threshold_schedulers["moe"] = LinearLR(
+        threshold_schedulers["moe"] = LinearLRWarmup(
             threshold_optimizers["moe"],
+            warmup_steps=args.threshold_warmup_epochs,
             start_factor=args.starting_threshold_moe / args.target_threshold_moe,
             end_factor=1.0,
             total_iters=args.epochs,
