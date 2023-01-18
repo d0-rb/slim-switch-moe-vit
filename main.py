@@ -423,7 +423,7 @@ def get_args_parser():
     parser.add_argument(
         "--threshold-warmup-epochs",
         type=int,
-        default=10,
+        default=5,
         metavar="N",
         help="epochs to warmup threshold, if scheduler supports",
     )
@@ -819,23 +819,6 @@ def main(args):
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
         lr_scheduler.step(args.start_epoch)
-    if args.eval:  # TODO: loop thru different thresholds for moe
-        current_thresh = args.starting_threeshold
-        while current_thresh <= args.target_threshold:
-            for name, module in model_without_ddp.named_modules():
-                if name in delta:
-                    module._threshold.data.copy_(
-                        current_thresh  # type: ignore[call-overload]
-                    )  # type: ignore[operator]
-                    torch.cuda.reset_peak_memory_stats()
-
-            test_stats = evaluate(data_loader_val, model, device)
-            print(
-                f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-            )
-
-            current_thresh += args.eval_threshold_step
-        return
 
     vis = utils.TokenSkipVisualizer(
         model=model,
@@ -964,11 +947,34 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
+    eval_threshold_list = np.linspace(start=args.starting_threshold,
+                                      stop=args.target_threshold,
+                                      num=(args.target_threshold - args.starting_threshold) / args.eval_threshold_step + 1,
+                                      endpoint=True)
+    for name, module in model_without_ddp.named_modules():
+        for current_thresh in eval_threshold_list:
+            if name.endswith("dense_gate"):
+                module.step(current_thresh)
+            elif name.endswith("moe_gate"):
+                module.step(current_thresh)
+            torch.cuda.reset_peak_memory_stats()
+
+        test_stats = evaluate(data_loader_val, model, device)
+        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats['acc1'], epoch)
+
+        print(
+            f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+        )
+
+        current_thresh -= args.eval_threshold_step
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
     vis.savefig(args.epochs, save_to_file=True)
     writer.close()
+
+
 
 
 if __name__ == "__main__":
