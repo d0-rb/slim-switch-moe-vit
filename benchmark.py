@@ -299,7 +299,8 @@ class BenchmarkRunner:
         self.channels_last = kwargs.pop("channels_last", False)
         self.amp_autocast = torch.cuda.amp.autocast if self.use_amp else suppress
 
-        self.model = models.resmoe_tiny_patch16_224_imnet_v4
+        # self.model = models.resmoe_tiny_patch16_224_expert8_imnet_multi_v4
+        self.model = models.resmoe_tiny_patch16_224_expert8_imnet_v4
         # self.model = models.resvit_tiny_patch16_224
         self.model_name = self.model.__name__
         self.model = self.model(**kwargs)

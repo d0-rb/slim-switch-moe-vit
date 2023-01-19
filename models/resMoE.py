@@ -56,7 +56,41 @@ class CustomizedMoEMLP(FMoETransformerMLP):
         )
 
 
-class Gate(nn.Module):
+class ProtoGate(nn.Module):
+    def __init__(
+        self,
+        target_threshold: float = 0.9,
+        starting_threshold: float = 1.0,
+        *args,
+        **kwargs,
+    ):
+
+        super().__init__()
+        self.register_buffer("_threshold", th.tensor(starting_threshold))
+        self.register_buffer("threshold", th.tensor(target_threshold))
+
+        self._total_tokens = 0
+        self._skipped_tokens = 0
+
+    def step(self, threshold: th.Tensor):
+        self._threshold.data.copy_(threshold)
+
+    def forward(self, x):
+        """contract function"""
+        raise NotImplementedError
+
+    def index_select(self, x, index):
+        """index_select code donated by Junru.
+        :x: TODO
+        :index: TODO
+        :returns: TODO
+        """
+        B, T, D = x.shape
+        index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
+        return th.gather(input=x, dim=1, index=index_repeat)
+
+
+class Gate(ProtoGate):
     def __init__(
         self,
         in_dim: int,
@@ -69,26 +103,18 @@ class Gate(nn.Module):
         keep_prev_mask=False,
     ):
 
-        super().__init__()
+        super().__init__(
+            target_threshold=target_threshold, starting_threshold=starting_threshold
+        )
         self.dropout = nn.Dropout(p=dropout)
         self.head = nn.Linear(in_dim, 1) if not keep_prev_mask else nn.Identity()
-        self.register_buffer("_threshold", th.tensor(starting_threshold))
-        self.register_buffer("threshold", th.tensor(target_threshold))
         self.register_buffer("tau", th.tensor(tau))
-
-        self.comparison_fn = max if starting_threshold > target_threshold else min
-
-        self._total_tokens = 0
-        self._skipped_tokens = 0
 
         self.is_hard = is_hard
         self.disable = False
         self.tk_idx = None
         self.add_guass_noise = add_guass_noise
         self.keep_prev_mask = keep_prev_mask
-
-    def step(self, threshold: th.Tensor):
-        self._threshold.data.copy_(threshold)
 
     def step_tau(self, delta: th.Tensor):
         tau = self.tau - delta
@@ -151,18 +177,8 @@ class Gate(nn.Module):
 
         return tokens, skip_tokens, summary_token, summary_skip_token
 
-    def index_select(self, x, index):
-        """index_select code donated by Junru.
-        :x: TODO
-        :index: TODO
-        :returns: TODO
-        """
-        B, T, D = x.shape
-        index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
-        return th.gather(input=x, dim=1, index=index_repeat)
 
-
-class GateMoE(nn.Module):
+class GateMoE(ProtoGate):
     def __init__(
         self,
         attn_blk: nn.Module,
@@ -172,14 +188,10 @@ class GateMoE(nn.Module):
         is_dist_tk: bool,
         disable: bool = False,
     ):
-        super().__init__()
-        self.register_buffer("_threshold", th.tensor(starting_threshold))
-        self.register_buffer("threshold", th.tensor(target_threshold))
+        super().__init__(
+            target_threshold=target_threshold, starting_threshold=starting_threshold
+        )
 
-        self.comparison_fn = max if starting_threshold > target_threshold else min
-
-        self._total_tokens = 0
-        self._skipped_tokens = 0
         self.is_clk_tk = is_clk_tk
         self.is_dist_tk = is_dist_tk
 
@@ -188,9 +200,6 @@ class GateMoE(nn.Module):
         self.disable = False
         self.tk_idx = None
         self.attn_blk = attn_blk
-
-    def step(self, threshold: th.Tensor):
-        self._threshold.data.copy_(threshold)
 
     def forward(
         self, x: th.Tensor
@@ -244,16 +253,6 @@ class GateMoE(nn.Module):
         self._total_tokens += math.prod(x.shape[0:2])
 
         return tokens, skip_tokens, summary_token, summary_skip_token
-
-    def index_select(self, x, index):
-        """index_select code donated by Junru.
-        :x: TODO
-        :index: TODO
-        :returns: TODO
-        """
-        B, T, D = x.shape
-        index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
-        return th.gather(input=x, dim=1, index=index_repeat)
 
 
 class ResBlock(Block):

@@ -116,6 +116,7 @@ def train_one_epoch(
 
 @torch.no_grad()
 def evaluate(data_loader, model, device, args):
+
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
