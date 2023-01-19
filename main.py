@@ -810,7 +810,7 @@ def main(args):
             args=args,
         )
 
-        curriculum_scheduler.step(epoch)
+        curriculum_scheduler.step(epoch, model)
 
         lr_scheduler.step(epoch)
         writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
