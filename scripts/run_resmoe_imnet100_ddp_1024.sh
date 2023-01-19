@@ -1,5 +1,5 @@
 #!/bin/bash
-cuda="2,3"
+cuda="5,7"
 batchsize=512
 model="resmoe_tiny_patch16_224_expert8_attn_loss_v4"
 lr="3e-4"
