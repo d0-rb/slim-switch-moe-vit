@@ -1,5 +1,4 @@
-
-# python3 -m torch.distributed.launch --nproc_per_node=3 --master_port=$RANDOM --use_env \
+#!/bin/bash
 
 LR=5e-4
 EPOCHS=300
