@@ -18,3 +18,5 @@ dataset/*
 *-models/
 imagenet
 .mypy_cache/*
+results*/
+ImageNet100/*
