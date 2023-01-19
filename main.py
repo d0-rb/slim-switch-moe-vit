@@ -37,7 +37,7 @@ from losses import DistillationLoss
 from models.resMoE import Gate
 from models.resMoE import GateMoE
 from samplers import RASampler
-from threshold_scheduler import CosineAnnealingLRWarmup, LinearLRWarmup
+from scheduler import CurriculumScheduler
 from utils import TensorboardXTracker
 
 # import models_v2
@@ -501,6 +501,13 @@ def main(args):
     if args.distillation_type != "none" and args.finetune and not args.eval:
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
+    timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
+    output_dir = os.path.join(args.output_dir, timestr)
+    os.makedirs(output_dir, exist_ok=True)
+    if args.output_dir:
+        writer = TensorboardXTracker(output_dir)
+    output_dir = Path(args.output_dir)
+
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -589,6 +596,8 @@ def main(args):
         starting_threshold_moe=args.starting_threshold_moe,
         target_threshold_moe=args.target_threshold_moe,
     )
+
+    curriculum_scheduler = CurriculumScheduler(args, writer)
 
     if args.finetune:
         if args.finetune.startswith("https"):
@@ -695,55 +704,6 @@ def main(args):
         model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
     )
 
-    threshold_optimizers = {}
-    if args.threshold_scheduler == "cosine":
-        threshold_optimizers["dense"] = Optimizer(
-            params=[{"params": []}], defaults={"lr": args.starting_threshold_dense}
-        )
-        threshold_optimizers["moe"] = Optimizer(
-            params=[{"params": []}], defaults={"lr": args.starting_threshold_moe}
-        )
-    elif args.threshold_scheduler == "linear":
-        threshold_optimizers["dense"] = Optimizer(
-            params=[{"params": []}], defaults={"lr": args.target_threshold_dense}
-        )
-        threshold_optimizers["moe"] = Optimizer(
-            params=[{"params": []}], defaults={"lr": args.target_threshold_moe}
-        )
-    threshold_schedulers = {}
-    if args.threshold_scheduler == "cosine":
-        threshold_schedulers["dense"] = CosineAnnealingLRWarmup(
-            threshold_optimizers["dense"],
-            T_max=args.epochs - 1,
-            warmup_steps=args.threshold_warmup_epochs,
-            eta_min=args.target_threshold_dense,
-            last_epoch=-1,
-        )
-        threshold_schedulers["moe"] = CosineAnnealingLRWarmup(
-            threshold_optimizers["moe"],
-            T_max=args.epochs - 1,
-            warmup_steps=args.threshold_warmup_epochs,
-            eta_min=args.target_threshold_moe,
-            last_epoch=-1,
-        )
-    elif args.threshold_scheduler == "linear":
-        threshold_schedulers["dense"] = LinearLRWarmup(
-            threshold_optimizers["dense"],
-            warmup_steps=args.threshold_warmup_epochs,
-            start_factor=args.starting_threshold_dense / args.target_threshold_dense,
-            end_factor=1.0,
-            total_iters=args.epochs,
-        )
-        threshold_schedulers["moe"] = LinearLRWarmup(
-            threshold_optimizers["moe"],
-            warmup_steps=args.threshold_warmup_epochs,
-            start_factor=args.starting_threshold_moe / args.target_threshold_moe,
-            end_factor=1.0,
-            total_iters=args.epochs,
-        )
-    else:
-        NotImplementedError
-
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -789,13 +749,6 @@ def main(args):
         args.distillation_tau,
     )
 
-    timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
-    output_dir = os.path.join(args.output_dir, timestr)
-    os.makedirs(output_dir, exist_ok=True)
-    if args.output_dir:
-        writer = TensorboardXTracker(output_dir)
-    output_dir = Path(args.output_dir)
-
     if args.resume:
         if args.resume.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -817,7 +770,10 @@ def main(args):
                 utils._load_checkpoint_for_ema(model_ema, checkpoint["model_ema"])
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
-        lr_scheduler.step(args.start_epoch)
+            if "curriculum" in checkpoint:
+                curriculum_scheduler.load_state_dict(checkpoint["curriculum"])
+                curriculum_scheduler.step(args.start_epoch, model_without_ddp)
+            lr_scheduler.step(args.start_epoch)
 
     vis = utils.TokenSkipVisualizer(
         model=model,
@@ -854,18 +810,7 @@ def main(args):
             args=args,
         )
 
-        threshold["dense"] = threshold_schedulers["dense"].step(epoch)
-        writer.log_scalar("train/thresholds/dense", threshold["dense"], epoch)
-        threshold["moe"] = threshold_schedulers["moe"].step(epoch)
-        writer.log_scalar("train/thresholds/gate", threshold["moe"], epoch)
-
-        for name, module in model.named_modules():
-            if name.endswith("dense_gate"):
-                module.step(threshold["dense"][0])
-                writer.log_scalar(f"threshold/{name}", threshold["dense"], epoch)
-            elif name.endswith("moe_gate"):
-                module.step(threshold["moe"][0])
-                writer.log_scalar(f"threshold/{name}", threshold["moe"], epoch)
+        curriculum_scheduler.step(epoch)
 
         lr_scheduler.step(epoch)
         writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
@@ -883,6 +828,7 @@ def main(args):
                         "model_ema": get_state_dict(model_ema),
                         "scaler": loss_scaler.state_dict(),
                         "args": args,
+                        "curriculum": curriculum_scheduler.state_dict(),
                     },
                     checkpoint_path,
                 )
@@ -909,7 +855,7 @@ def main(args):
             if args.output_dir:
                 checkpoint_paths = [output_dir / "best_checkpoint.pth"]
                 for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master(
+                    ckpt = (
                         {
                             "model": model_without_ddp.state_dict(),
                             "optimizer": optimizer.state_dict(),
@@ -919,6 +865,8 @@ def main(args):
                             "scaler": loss_scaler.state_dict(),
                             "args": args,
                         },
+                    )
+                    utils.save_on_master(
                         checkpoint_path,
                     )
             if args.vis_enabled:
@@ -946,10 +894,13 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-    eval_threshold_list = np.linspace(start=args.starting_threshold,
-                                      stop=args.target_threshold,
-                                      num=(args.target_threshold - args.starting_threshold) / args.eval_threshold_step + 1,
-                                      endpoint=True)
+    eval_threshold_list = np.linspace(
+        start=args.starting_threshold,
+        stop=args.target_threshold,
+        num=(args.target_threshold - args.starting_threshold) / args.eval_threshold_step
+        + 1,
+        endpoint=True,
+    )
     for name, module in model_without_ddp.named_modules():
         for current_thresh in eval_threshold_list:
             if name.endswith("dense_gate"):
@@ -959,7 +910,7 @@ def main(args):
             torch.cuda.reset_peak_memory_stats()
 
         test_stats = evaluate(data_loader_val, model, device)
-        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats['acc1'], epoch)
+        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
 
         print(
             f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
@@ -972,8 +923,6 @@ def main(args):
     print("Training time {}".format(total_time_str))
     vis.savefig(args.epochs, save_to_file=True)
     writer.close()
-
-
 
 
 if __name__ == "__main__":
