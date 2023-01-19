@@ -896,9 +896,11 @@ def main(args):
     eval_threshold_list = np.linspace(
         start=args.starting_threshold,
         stop=args.target_threshold,
-        num=(args.target_threshold_dense - args.starting_threshold_dense)
-        / args.eval_threshold_step
-        + 1,
+        num=int(
+            (args.target_threshold_dense - args.starting_threshold_dense)
+            / args.eval_threshold_step
+            + 1
+        ),
         endpoint=True,
     )
     for name, module in model_without_ddp.named_modules():
@@ -909,7 +911,7 @@ def main(args):
                 module.step(current_thresh)
             torch.cuda.reset_peak_memory_stats()
 
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device, args)
         writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
 
         print(
