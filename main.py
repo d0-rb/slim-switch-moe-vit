@@ -37,7 +37,8 @@ from losses import DistillationLoss
 from models.resMoE import Gate
 from models.resMoE import GateMoE
 from samplers import RASampler
-from threshold_scheduler import CosineAnnealingLRWarmup, LinearLRWarmup
+from threshold_scheduler import CosineAnnealingLRWarmup
+from threshold_scheduler import LinearLRWarmup
 from utils import TensorboardXTracker
 
 # import models_v2
@@ -946,10 +947,14 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-    eval_threshold_list = np.linspace(start=args.starting_threshold,
-                                      stop=args.target_threshold,
-                                      num=(args.target_threshold - args.starting_threshold) / args.eval_threshold_step + 1,
-                                      endpoint=True)
+    eval_threshold_list = np.linspace(
+        start=args.starting_threshold,
+        stop=args.target_threshold,
+        num=(args.target_threshold_dense - args.starting_threshold_dense)
+        / args.eval_threshold_step
+        + 1,
+        endpoint=True,
+    )
     for name, module in model_without_ddp.named_modules():
         for current_thresh in eval_threshold_list:
             if name.endswith("dense_gate"):
@@ -959,7 +964,7 @@ def main(args):
             torch.cuda.reset_peak_memory_stats()
 
         test_stats = evaluate(data_loader_val, model, device)
-        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats['acc1'], epoch)
+        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
 
         print(
             f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
@@ -972,8 +977,6 @@ def main(args):
     print("Training time {}".format(total_time_str))
     vis.savefig(args.epochs, save_to_file=True)
     writer.close()
-
-
 
 
 if __name__ == "__main__":
