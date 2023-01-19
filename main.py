@@ -897,7 +897,8 @@ def main(args):
     eval_threshold_list = np.linspace(
         start=args.starting_threshold,
         stop=args.target_threshold,
-        num=(args.target_threshold - args.starting_threshold) / args.eval_threshold_step
+        num=(args.target_threshold_dense - args.starting_threshold_dense)
+        / args.eval_threshold_step
         + 1,
         endpoint=True,
     )
