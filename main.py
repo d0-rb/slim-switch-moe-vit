@@ -772,7 +772,7 @@ def main(args):
                 loss_scaler.load_state_dict(checkpoint["scaler"])
             if "curriculum" in checkpoint:
                 curriculum_scheduler.load_state_dict(checkpoint["curriculum"])
-                curriculum_scheduler.step(args.start_epoch, model_without_ddp)
+                curriculum_scheduler.step(args.start_epoch, model)
             lr_scheduler.step(args.start_epoch)
 
     vis = utils.TokenSkipVisualizer(
@@ -855,7 +855,7 @@ def main(args):
             if args.output_dir:
                 checkpoint_paths = [output_dir / "best_checkpoint.pth"]
                 for checkpoint_path in checkpoint_paths:
-                    ckpt = (
+                    utils.save_on_master(
                         {
                             "model": model_without_ddp.state_dict(),
                             "optimizer": optimizer.state_dict(),
@@ -864,9 +864,8 @@ def main(args):
                             "model_ema": get_state_dict(model_ema),
                             "scaler": loss_scaler.state_dict(),
                             "args": args,
+                            "curriculum": curriculum_scheduler.state_dict(),
                         },
-                    )
-                    utils.save_on_master(
                         checkpoint_path,
                     )
             if args.vis_enabled:
