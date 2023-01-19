@@ -18,9 +18,9 @@ from .vision_transformer import Block
 
 
 class GateImnet(GateMoE):
-    def __init__(self, embed_dim, *args, **kwargs):
+    def __init__(self, norm_layer: typ.Callable, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.norm = nn.LayerNorm(embed_dim)
+        self.norm = norm_layer
 
     def forward(self, x, attn):
         # assume x is sorted by attn
@@ -249,7 +249,7 @@ def resmoe_tiny_patch16_224_expert8_imnet_v4(
 
             else:
                 module.dense_gate = GateImnet(
-                    embed_dim,
+                    module.norm1,
                     module.attn,
                     starting_threshold=starting_threshold_moe,
                     target_threshold=target_threshold_moe,
@@ -258,7 +258,7 @@ def resmoe_tiny_patch16_224_expert8_imnet_v4(
                 )
 
                 module.moe_gate = GateImnet(
-                    embed_dim,
+                    module.norm2,
                     module.attn,
                     starting_threshold=starting_threshold_moe,
                     target_threshold=target_threshold_moe,

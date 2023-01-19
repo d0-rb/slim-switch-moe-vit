@@ -36,11 +36,13 @@ from engine import train_one_epoch
 from losses import DistillationLoss
 from models.resMoE import Gate
 from models.resMoE import GateMoE
+from models.resmoe_imnet import GateImnet
 from samplers import RASampler
-from threshold_scheduler import CosineAnnealingLR
 from threshold_scheduler import CosineAnnealingLRWarmup
-from threshold_scheduler import LinearLR
+from threshold_scheduler import LinearLRWarmup
 from utils import TensorboardXTracker
+
+# import models_v2
 
 
 def get_args_parser():
@@ -386,7 +388,7 @@ def get_args_parser():
         "--eval-crop-ratio", default=0.875, type=float, help="Crop ratio for evaluation"
     )
     parser.add_argument(
-        "--dist-eval",
+        "-dist-eval",
         action="store_true",
         default=False,
         help="Enabling distributed evaluation",
@@ -421,7 +423,7 @@ def get_args_parser():
     parser.add_argument(
         "--threshold-warmup-epochs",
         type=int,
-        default=10,
+        default=5,
         metavar="N",
         help="epochs to warmup threshold, if scheduler supports",
     )
@@ -669,7 +671,10 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.gpu],
+        )
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of params:", n_parameters)
@@ -711,7 +716,6 @@ def main(args):
             params=[{"params": []}], defaults={"lr": args.target_threshold_moe}
         )
     threshold_schedulers = {}
-    # for threshold_optimizer in threshold_optimizers:
     if args.threshold_scheduler == "cosine":
         threshold_schedulers["dense"] = CosineAnnealingLRWarmup(
             threshold_optimizers["dense"],
@@ -728,14 +732,16 @@ def main(args):
             last_epoch=-1,
         )
     elif args.threshold_scheduler == "linear":
-        threshold_schedulers["dense"] = LinearLR(
+        threshold_schedulers["dense"] = LinearLRWarmup(
             threshold_optimizers["dense"],
+            warmup_steps=args.threshold_warmup_epochs,
             start_factor=args.starting_threshold_dense / args.target_threshold_dense,
             end_factor=1.0,
             total_iters=args.epochs,
         )
-        threshold_schedulers["moe"] = LinearLR(
+        threshold_schedulers["moe"] = LinearLRWarmup(
             threshold_optimizers["moe"],
+            warmup_steps=args.threshold_warmup_epochs,
             start_factor=args.starting_threshold_moe / args.target_threshold_moe,
             end_factor=1.0,
             total_iters=args.epochs,
@@ -817,23 +823,6 @@ def main(args):
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
         lr_scheduler.step(args.start_epoch)
-    if args.eval:  # TODO: loop thru different thresholds for moe
-        current_thresh = args.starting_threeshold
-        while current_thresh <= args.target_threshold:
-            for name, module in model_without_ddp.named_modules():
-                if name in delta:
-                    module._threshold.data.copy_(
-                        current_thresh  # type: ignore[call-overload]
-                    )  # type: ignore[operator]
-                    torch.cuda.reset_peak_memory_stats()
-
-            test_stats = evaluate(data_loader_val, model, device)
-            print(
-                f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-            )
-
-            current_thresh += args.eval_threshold_step
-        return
 
     vis = utils.TokenSkipVisualizer(
         model=model,
@@ -944,7 +933,7 @@ def main(args):
         writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
         for name, m in model.named_modules():
-            if isinstance(m, (Gate, GateMoE)):
+            if isinstance(m, (Gate, GateMoE, GateImnet)):
                 skip_ratio = m._skipped_tokens / m._total_tokens
                 writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
                 # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
@@ -962,10 +951,34 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
+    eval_threshold_list = np.linspace(
+        start=args.starting_threshold,
+        stop=args.target_threshold,
+        num=(args.target_threshold - args.starting_threshold) / args.eval_threshold_step
+        + 1,
+        endpoint=True,
+    )
+    for name, module in model_without_ddp.named_modules():
+        for current_thresh in eval_threshold_list:
+            if name.endswith("dense_gate"):
+                module.step(current_thresh)
+            elif name.endswith("moe_gate"):
+                module.step(current_thresh)
+            torch.cuda.reset_peak_memory_stats()
+
+        test_stats = evaluate(data_loader_val, model, device)
+        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
+
+        print(
+            f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+        )
+
+        current_thresh -= args.eval_threshold_step
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
-    # vis.savefig(args.epochs, save_to_file=True)
+    vis.savefig(args.epochs, save_to_file=True)
     writer.close()
 
 
