@@ -39,6 +39,7 @@ def train_one_epoch(
     set_training_mode=True,
     args=None,
 ):
+    assert args is not None
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
@@ -57,7 +58,10 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast():
             outputs = model(samples)
-            loss = criterion(samples, outputs, targets)
+            loss = criterion(samples, outputs[0], targets)
+            if args.data_set in ("IMNET", "IMNET100"):
+                loss = loss + criterion(samples, outputs[1], targets)
+                loss = loss / 2.0
 
         loss_attn: typ.List[typ.Any] = []  # mypy keep yelling at me
         # loss_attn should be a list of tensor
@@ -131,8 +135,13 @@ def evaluate(data_loader, model, device, args):
 
         # compute output
         with torch.cuda.amp.autocast():
-            output = model(images)
-            loss = criterion(output, target)
+            outputs = model(images)
+            output = outputs[0]
+            loss = criterion(outputs[0], target)
+            if args.data_set in ("IMNET", "IMNET100"):
+                loss = loss + criterion(outputs[1], target)
+                loss = loss / 2.0
+                output = outputs[1]
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 

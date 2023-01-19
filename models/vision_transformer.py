@@ -763,6 +763,11 @@ class VisionTransformer(nn.Module):
             if num_classes > 0
             else nn.Identity()
         )
+        self.head_patch = (
+            nn.Linear(self.num_features, num_classes)
+            if num_classes > 0
+            else nn.Identity()
+        )
         self.head_dist = None
         if distilled:
             self.head_dist = (
@@ -811,6 +816,9 @@ class VisionTransformer(nn.Module):
         self.head = (
             nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         )
+        self.head_patch = (
+            nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        )
         if self.num_tokens == 2:
             self.head_dist = (
                 nn.Linear(self.embed_dim, self.num_classes)
@@ -832,23 +840,15 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x + self.pos_embed)
         x = self.blocks(x)
         x = self.norm(x)
-        if self.dist_token is None:
-            return self.pre_logits(x[:, 0])
-        else:
-            return x[:, 0], x[:, 1]
+
+        return x[:, 0], x[:, 1::].mean(dim=1)
 
     def forward(self, x):
-        x = self.forward_features(x)
-        if self.head_dist is not None:
-            x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
-            if self.training and not torch.jit.is_scripting():
-                # during inference, return the average of both classifier predictions
-                return x, x_dist
-            else:
-                return (x + x_dist) / 2
-        else:
-            x = self.head(x)
-        return x
+        # x = self.forward_features(x)
+        x_cls, x_patch = self.forward_features(x)
+        x_cls = self.head(x_cls)
+        x_patch = self.head_patch(x_patch)
+        return x_cls, x_patch
 
 
 def _init_vit_weights(
