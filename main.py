@@ -894,8 +894,8 @@ def main(args):
                 f.write(json.dumps(log_stats) + "\n")
 
     eval_threshold_list = np.linspace(
-        start=args.starting_threshold,
-        stop=args.target_threshold,
+        start=args.starting_threshold_dense,
+        stop=args.target_threshold_dense,
         num=int(
             (args.target_threshold_dense - args.starting_threshold_dense)
             / args.eval_threshold_step
