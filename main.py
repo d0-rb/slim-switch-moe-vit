@@ -790,70 +790,35 @@ def main(args):
     start_time = time.time()
     max_accuracy = 0.0
     threshold = {}
-    for epoch in range(args.start_epoch, args.epochs):
-        torch.cuda.reset_peak_memory_stats()
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
+    try:
+        for epoch in range(args.start_epoch, args.epochs):
+            torch.cuda.reset_peak_memory_stats()
+            if args.distributed:
+                data_loader_train.sampler.set_epoch(epoch)
 
-        train_stats = train_one_epoch(
-            model,
-            criterion,
-            data_loader_train,
-            optimizer,
-            device,
-            epoch,
-            loss_scaler,
-            args.clip_grad,
-            model_ema,
-            mixup_fn,
-            set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
-            args=args,
-        )
+            train_stats = train_one_epoch(
+                model,
+                criterion,
+                data_loader_train,
+                optimizer,
+                device,
+                epoch,
+                loss_scaler,
+                args.clip_grad,
+                model_ema,
+                mixup_fn,
+                set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
+                args=args,
+            )
 
-        curriculum_scheduler.step(epoch, model)
+            curriculum_scheduler.step(epoch, model)
 
-        lr_scheduler.step(epoch)
-        writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
-        writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
+            lr_scheduler.step(epoch)
+            writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+            writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
 
-        if args.output_dir:
-            checkpoint_paths = [output_dir / "checkpoint.pth"]
-            for checkpoint_path in checkpoint_paths:
-                utils.save_on_master(
-                    {
-                        "model": model_without_ddp.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "epoch": epoch,
-                        "model_ema": get_state_dict(model_ema),
-                        "scaler": loss_scaler.state_dict(),
-                        "args": args,
-                        "curriculum": curriculum_scheduler.state_dict(),
-                    },
-                    checkpoint_path,
-                )
-
-        test_stats = evaluate(data_loader_val, model, device, args)
-
-        writer.log_scalar(
-            "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
-        )
-
-        print(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-        )
-
-        writer.log_scalar("train/loss", train_stats["loss"], epoch)
-        writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
-
-        if "loss_attn" in train_stats:
-            writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
-
-        if max_accuracy < test_stats["acc1"]:
-            # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-            max_accuracy = test_stats["acc1"]
             if args.output_dir:
-                checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                checkpoint_paths = [output_dir / "checkpoint.pth"]
                 for checkpoint_path in checkpoint_paths:
                     utils.save_on_master(
                         {
@@ -868,49 +833,91 @@ def main(args):
                         },
                         checkpoint_path,
                     )
-            if args.vis_enabled:
-                vis.savefig(epoch)
 
-        print(f"Max accuracy: {max_accuracy:.2f}%")
-        writer.log_scalar("test/acc1/max", max_accuracy, epoch)
+            test_stats = evaluate(data_loader_val, model, device, args)
 
-        for name, m in model.named_modules():
-            if isinstance(m, (Gate, GateMoE)):
-                skip_ratio = m._skipped_tokens / m._total_tokens
-                writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
-                # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
-                m._skipped_tokens = 0.0
-                m._total_tokens = 0.0
+            writer.log_scalar(
+                "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+            )
 
-        log_stats = {
-            **{f"train_{k}": v for k, v in train_stats.items()},
-            **{f"test_{k}": v for k, v in test_stats.items()},
-            "epoch": epoch,
-            "n_parameters": n_parameters,
-        }
+            print(
+                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+            )
 
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+            writer.log_scalar("train/loss", train_stats["loss"], epoch)
+            writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+
+            if "loss_attn" in train_stats:
+                writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
+
+            if max_accuracy < test_stats["acc1"]:
+                # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
+                max_accuracy = test_stats["acc1"]
+                if args.output_dir:
+                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                    for checkpoint_path in checkpoint_paths:
+                        utils.save_on_master(
+                            {
+                                "model": model_without_ddp.state_dict(),
+                                "optimizer": optimizer.state_dict(),
+                                "lr_scheduler": lr_scheduler.state_dict(),
+                                "epoch": epoch,
+                                "model_ema": get_state_dict(model_ema),
+                                "scaler": loss_scaler.state_dict(),
+                                "args": args,
+                                "curriculum": curriculum_scheduler.state_dict(),
+                            },
+                            checkpoint_path,
+                        )
+                if args.vis_enabled:
+                    vis.savefig(epoch)
+
+            print(f"Max accuracy: {max_accuracy:.2f}%")
+            writer.log_scalar("test/acc1/max", max_accuracy, epoch)
+
+            for name, m in model.named_modules():
+                if name.endswith(("dense_gate", "moe_gate")):
+                    if not m.disable:
+                        skip_ratio = m._skipped_tokens / m._total_tokens
+                        writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
+                        m._skipped_tokens = 0.0
+                        m._total_tokens = 0.0
+                        if hasattr(m, "group_size"):
+                            writer.log_scalar(
+                                f"receptive_size/{name}", m.group_size, epoch
+                            )
+                        # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
+
+            log_stats = {
+                **{f"train_{k}": v for k, v in train_stats.items()},
+                **{f"test_{k}": v for k, v in test_stats.items()},
+                "epoch": epoch,
+                "n_parameters": n_parameters,
+            }
+
+            if args.output_dir and utils.is_main_process():
+                with (output_dir / "log.txt").open("a") as f:
+                    f.write(json.dumps(log_stats) + "\n")
+    except KeyboardInterrupt:
+        print("stopping experiment prematurely...")
+        print("performing evaluation at different thresholds")
 
     eval_threshold_list = np.linspace(
-        start=args.starting_threshold_dense,
+        start=1.0,
         stop=args.target_threshold_dense,
-        num=int(
-            (args.target_threshold_dense - args.starting_threshold_dense)
-            / args.eval_threshold_step
-            + 1
-        ),
+        num=int((1.0 - args.starting_threshold_dense) / args.eval_threshold_step + 1),
         endpoint=True,
     )
-    for name, module in model_without_ddp.named_modules():
-        for current_thresh in eval_threshold_list:
+
+    for current_thresh in eval_threshold_list:
+
+        for name, module in model_without_ddp.named_modules():
             if name.endswith("dense_gate"):
                 module.step(current_thresh)
             elif name.endswith("moe_gate"):
                 module.step(current_thresh)
-            torch.cuda.reset_peak_memory_stats()
 
+        torch.cuda.reset_peak_memory_stats()
         test_stats = evaluate(data_loader_val, model, device, args)
         writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
 
@@ -920,10 +927,12 @@ def main(args):
 
         current_thresh -= args.eval_threshold_step
 
+    if args.distributed:
+        torch.distributed.barrier()
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
-    vis.savefig(args.epochs, save_to_file=True)
+    vis.savefig(args.epochs)
     writer.close()
 
 
