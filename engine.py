@@ -57,7 +57,9 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast():
             outputs = model(samples)
-            loss = criterion(samples, outputs, targets)
+            loss = criterion(samples, outputs[0], targets)
+            loss += criterion(samples, outputs[1], targets)
+            loss = loss / 2.0
 
         loss_attn: typ.List[typ.Any] = []  # mypy keep yelling at me
         # loss_attn should be a list of tensor
