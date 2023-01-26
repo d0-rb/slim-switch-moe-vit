@@ -489,6 +489,7 @@ def get_args_parser():
         type=float,
         help="steps when evaluating model at different thresholds",
     )
+    parser.add_argument("--num-rep", default=14, type=int)
 
     return parser
 
@@ -595,6 +596,7 @@ def main(args):
         target_threshold_dense=args.target_threshold_dense,
         starting_threshold_moe=args.starting_threshold_moe,
         target_threshold_moe=args.target_threshold_moe,
+        num_rep=args.num_rep,
     )
 
     curriculum_scheduler = CurriculumScheduler(args, writer)
@@ -909,23 +911,23 @@ def main(args):
         endpoint=True,
     )
 
-    for current_thresh in eval_threshold_list:
+    # for current_thresh in eval_threshold_list:
 
-        for name, module in model_without_ddp.named_modules():
-            if name.endswith("dense_gate"):
-                module.step(current_thresh)
-            elif name.endswith("moe_gate"):
-                module.step(current_thresh)
+    # for name, module in model_without_ddp.named_modules():
+    # if name.endswith("dense_gate"):
+    # module.step(current_thresh)
+    # elif name.endswith("moe_gate"):
+    # module.step(current_thresh)
 
-        torch.cuda.reset_peak_memory_stats()
-        test_stats = evaluate(data_loader_val, model, device, args)
-        writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
+    # torch.cuda.reset_peak_memory_stats()
+    # test_stats = evaluate(data_loader_val, model, device, args)
+    # writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
 
-        print(
-            f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-        )
+    # print(
+    # f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+    # )
 
-        current_thresh -= args.eval_threshold_step
+    # current_thresh -= args.eval_threshold_step
 
     if args.distributed:
         torch.distributed.barrier()

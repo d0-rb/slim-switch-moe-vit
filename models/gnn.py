@@ -149,10 +149,9 @@ from .model import deit_tiny_patch16_224
 @register_model
 def resvit_tiny_patch16_224_gcn_g3_o14(
     pretrained=False,
-    starting_threshold_dense=1.0,
     target_threshold_dense=0.9,
-    starting_threshold_moe=1.0,
     target_threshold_moe=0.9,
+    num_rep=14,
     **kwargs,
 ):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
@@ -181,7 +180,7 @@ def resvit_tiny_patch16_224_gcn_g3_o14(
                     embed_dim,
                     target_threshold_dense,
                     target_threshold_moe,
-                    output_represenation=14,
+                    output_represenation=num_rep,
                     num_layers=1,
                     pre_sorted=False,
                 )
