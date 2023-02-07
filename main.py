@@ -34,6 +34,7 @@ from datasets import build_dataset
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
+from models.gnn import GNN
 from models.resMoE import Gate
 from models.resMoE import GateMoE
 from samplers import RASampler
@@ -812,6 +813,12 @@ def main(args):
                 set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
                 args=args,
             )
+
+            if epoch == 200:
+                for name, module in model.named_modules():
+                    if "gcn_gate" in name and isinstance(module, GNN):
+                        module._selective_combination = True
+                        print("selective combiation activated")
 
             curriculum_scheduler.step(epoch, model)
 

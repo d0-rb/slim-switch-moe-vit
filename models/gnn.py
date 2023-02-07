@@ -44,6 +44,7 @@ class GNN(nn.Module):
         self._node_density = node_density
         self._edge_density = edge_density
         self._pre_sorted = pre_sorted
+        self._selective_combination = False
 
         self.layers_GCN = nn.ModuleList([])
 
@@ -86,10 +87,14 @@ class GNN(nn.Module):
         grouping = self.feature_forward(skip_patch_tk, edges, edge_weights).view(
             skip_patch_shape[0], skip_patch_shape[1], -1
         )
+        grouping = th.transpose(grouping, -1, -2)  # B x K x T
+        if not self.training or self._selective_combination:
+            patch2k_grouping = int(grouping.size(2) / 2)
+            threshold = grouping.topk(k=patch2k_grouping, dim=-1)[0][:, :, -1::]
+            grouping = grouping * (grouping >= threshold).float()
+            grouping = grouping / 0.5
 
-        skip_token_summaries = th.transpose(grouping, -1, -2) @ skip_patch_tk.reshape(
-            *skip_patch_shape
-        )
+        skip_token_summaries = grouping @ skip_patch_tk.reshape(*skip_patch_shape)
 
         return th.cat([patch_tk, skip_token_summaries], dim=1)
 

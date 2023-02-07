@@ -15,7 +15,7 @@ port=$((9000 + RANDOM % 1000))
 #model="resmoe_tiny_patch16_224_expert8_attn_loss_v4_delay_start"
 #model="deit_tiny_patch16_224"
 model='resvit_tiny_patch16_224_gcn_g3_o14'
-lr="5e-4"
+lr="3e-4"
 start_threshold="0.5"
 dataset="IMNET100"
 n=0  # seed
@@ -31,5 +31,4 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cud
                 --starting-threshold-dense $start_threshold --target-threshold-dense $target_threshold_node \
                 --starting-threshold-moe $start_threshold --target-threshold-moe $target_threshold_edge \
                 --output_dir \
-                results/${dataset}/${model}-topkinference/lr_${lr}_ep_${epochs}/gcn_${target_threshold_node}/${target_threshold_edge}/${num_rep}/${n}\
-
+                results/${dataset}/${model}/lr_${lr}_ep_${epochs}/gcn_${target_threshold_node}/${target_threshold_edge}/${num_rep}/${n}

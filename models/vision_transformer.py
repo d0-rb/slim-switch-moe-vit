@@ -842,8 +842,8 @@ class VisionTransformer(nn.Module):
         x = self.blocks(x)
         x = self.norm(x)
 
-        x_cls = x[:, 0:1, ::]
-        x_patch = x[:, 1::, ::].mean(dim=1, keepdim=True)
+        x_cls = x[:, 0, ::]
+        x_patch = x[:, 1::, ::].mean(dim=1)
 
         return x_cls, x_patch
 
