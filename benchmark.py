@@ -249,6 +249,7 @@ parser.add_argument(
     help="target token skip threshold (for both attn and moe gates)",
 )
 parser.add_argument("--num-rep", default=14, type=int)
+parser.add_argument("--num_experts", default=32, type=int)
 
 
 def timestamp(sync=False):
@@ -301,11 +302,9 @@ class BenchmarkRunner:
         self.amp_autocast = torch.cuda.amp.autocast if self.use_amp else suppress
 
         self.model = eval(f"models.{model_name}")  # resvit_tiny_patch16_224_expert8_gcn
-        # self.model = models.deit_tiny_patch16_224
-        # self.model = models.resmoe_tiny_patch16_224_expert8_imnet_v4
-        # self.model = models.resvit_tiny_patch16_224
         self.model_name = self.model.__name__
         self.model = self.model(**kwargs)
+        __import__("pdb").set_trace()
 
         self.model.to(
             device=self.device,

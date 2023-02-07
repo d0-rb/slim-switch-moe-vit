@@ -1,4 +1,6 @@
-from .gnn import *
+# from .gnn import *
+# from .model import *
+# from .resMoE import *
+# from .resmoe_imnet import *
 from .model import *
-from .resMoE import *
-from .resmoe_imnet import *
+from .vit_moe import *

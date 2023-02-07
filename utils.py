@@ -697,3 +697,30 @@ class TokenSkipVisualizer:
         self._save_to_file = False
 
         self.track_idx = False
+
+
+class Optional(object):
+
+    """optional classes that can be None or something else"""
+
+    def __init__(self, func=None):
+        """TODO: to be defined.
+
+        :func: TODO
+
+        """
+        self._func = func
+
+    def __call__(self, *args, **kwargs):
+        if self._func:
+            return self._func(*args, **kwargs)
+        else:
+            return None
+
+    def __getattr__(self, name):
+        if name == "_func":
+            return self._func
+        elif self._func:
+            return getattr(self._func, name)
+        else:
+            return None

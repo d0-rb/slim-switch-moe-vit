@@ -380,7 +380,9 @@ def get_args_parser():
         "--device", default="cuda", help="device to use for training / testing"
     )
     parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument("--resume", default="", help="resume from checkpoint")
+    parser.add_argument(
+        "--resume", default="", help="resume from checkpoint", required=True
+    )
     parser.add_argument(
         "--start_epoch", default=0, type=int, metavar="N", help="start epoch"
     )
@@ -496,12 +498,23 @@ def get_args_parser():
     parser.add_argument(
         "--num-experts", type=int, default=32, help="number of experts for MoE layer"
     )
+    parser.add_argument(
+        "--experts-dropout",
+        type=int,
+        default=32,
+        help="number of experts for MoE layer",
+    )
+    parser.add_argument(
+        "--experts-merge", type=int, default=32, help="number of experts for MoE layer"
+    )
 
     return parser
 
 
 def main(args):
     utils.init_distributed_mode(args)
+    if args.distributed:
+        raise NotImplementedError
 
     print(args)
 
@@ -527,8 +540,10 @@ def main(args):
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
 
-    dataset_train, _ = train_val_split(dataset_train, val_size=0.1, seed=args.seed)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
+    dataset_train, dataset_val = train_val_split(
+        dataset_train, val_size=0.1, seed=args.seed
+    )
+    dataset_test, _ = build_dataset(is_train=False, args=args)
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -542,19 +557,23 @@ def main(args):
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
         if args.dist_eval:
-            if len(dataset_val) % num_tasks != 0:
+            if len(dataset_test) % num_tasks != 0:
                 print(
                     "Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. "
                     "This will slightly alter validation results as extra duplicate entries are added to achieve "
                     "equal num of samples per-process."
                 )
+            sampler_test = torch.utils.data.DistributedSampler(
+                dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False
+            )
             sampler_val = torch.utils.data.DistributedSampler(
                 dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
             )
         else:
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+            sampler_test = torch.utils.data.SequentialSampler(dataset_test)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_test = torch.utils.data.SequentialSampler(dataset_test)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
@@ -565,12 +584,20 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
     )
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val,
+        sampler=sampler_train,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
     if args.ThreeAugment:
         data_loader_train.dataset.transform = new_data_aug_generator(args)
 
-    data_loader_val = torch.utils.data.DataLoader(
-        dataset_val,
-        sampler=sampler_val,
+    data_loader_test = torch.utils.data.DataLoader(
+        dataset_test,
+        sampler=sampler_test,
         batch_size=int(1.5 * args.batch_size),
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -602,99 +629,10 @@ def main(args):
         img_size=args.input_size,
         num_experts=args.num_experts,
     )
-    # model = create_model(
-    # args.model,
-    # pretrained=False,
-    # num_classes=args.nb_classes,
-    # drop_rate=args.drop,
-    # drop_path_rate=args.drop_path,
-    # drop_block_rate=None,
-    # img_size=args.input_size,
-    # starting_threshold_dense=args.starting_threshold_dense,
-    # target_threshold_dense=args.target_threshold_dense,
-    # starting_threshold_moe=args.starting_threshold_moe,
-    # target_threshold_moe=args.target_threshold_moe,
-    # num_rep=args.num_rep,
-    # )
 
     curriculum_scheduler = Optional(None)  # CurriculumScheduler(args, writer)
 
-    if args.finetune:
-        if args.finetune.startswith("https"):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.finetune, map_location="cpu", check_hash=True
-            )
-        else:
-            checkpoint = torch.load(args.finetune, map_location="cpu")
-
-        checkpoint_model = checkpoint["model"]
-        state_dict = model.state_dict()
-        for k in ["head.weight", "head.bias", "head_dist.weight", "head_dist.bias"]:
-            if (
-                k in checkpoint_model
-                and checkpoint_model[k].shape != state_dict[k].shape
-            ):
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-
-        # interpolate position embedding
-        pos_embed_checkpoint = checkpoint_model["pos_embed"]
-        embedding_size = pos_embed_checkpoint.shape[-1]
-        num_patches = model.patch_embed.num_patches
-        num_extra_tokens = model.pos_embed.shape[-2] - num_patches
-        # height (== width) for the checkpoint position embedding
-        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
-        # height (== width) for the new position embedding
-        new_size = int(num_patches**0.5)
-        # class_token and dist_token are kept unchanged
-        extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
-        # only the position tokens are interpolated
-        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
-        pos_tokens = pos_tokens.reshape(
-            -1, orig_size, orig_size, embedding_size
-        ).permute(0, 3, 1, 2)
-        pos_tokens = torch.nn.functional.interpolate(
-            pos_tokens, size=(new_size, new_size), mode="bicubic", align_corners=False
-        )
-        pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
-        new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-        checkpoint_model["pos_embed"] = new_pos_embed
-
-        model.load_state_dict(checkpoint_model, strict=False)
-
-    if args.attn_only:
-        for name_p, p in model.named_parameters():
-            if ".attn." in name_p:
-                p.requires_grad = True
-            else:
-                p.requires_grad = False
-        try:
-            model.head.weight.requires_grad = True
-            model.head.bias.requires_grad = True
-        except:
-            model.fc.weight.requires_grad = True
-            model.fc.bias.requires_grad = True
-        try:
-            model.pos_embed.requires_grad = True
-        except:
-            print("no position encoding")
-        try:
-            for p in model.patch_embed.parameters():
-                p.requires_grad = False
-        except:
-            print("no patch embed")
-
     model.to(device)
-
-    model_ema = None
-    if args.model_ema:
-        # meanportant to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-        model_ema = ModelEma(
-            model,
-            decay=args.model_ema_decay,
-            device="cpu" if args.model_ema_force_cpu else "",
-            resume="",
-        )
 
     model_without_ddp = model
     if args.distributed:
@@ -740,34 +678,8 @@ def main(args):
         criterion = torch.nn.BCEWithLogitsLoss()
 
     teacher_model = None
-    if args.distillation_type != "none":
-        assert args.teacher_path, "need to specify teacher-path when using distillation"
-        print(f"Creating teacher model: {args.teacher_model}")
-        teacher_model = create_model(
-            args.teacher_model,
-            pretrained=False,
-            num_classes=args.nb_classes,
-            global_pool="avg",
-        )
-        if args.teacher_path.startswith("https"):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.teacher_path, map_location="cpu", check_hash=True
-            )
-        else:
-            checkpoint = torch.load(args.teacher_path, map_location="cpu")
-        teacher_model.load_state_dict(checkpoint["model"])
-        teacher_model.to(device)
-        teacher_model.eval()
-
     # wrap the criterion in our custom DistillationLoss, which
     # just dispatches to the original criterion if args.distillation_type is 'none'
-    criterion = DistillationLoss(
-        criterion,
-        teacher_model,
-        args.distillation_type,
-        args.distillation_alpha,
-        args.distillation_tau,
-    )
 
     if args.resume:
         if args.resume.startswith("https"):
@@ -777,189 +689,13 @@ def main(args):
         else:
             checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"])
-        if (
-            not args.eval
-            and "optimizer" in checkpoint
-            and "lr_scheduler" in checkpoint
-            and "epoch" in checkpoint
-        ):
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            args.start_epoch = checkpoint["epoch"] + 1
-            if args.model_ema:
-                utils._load_checkpoint_for_ema(model_ema, checkpoint["model_ema"])
-            if "scaler" in checkpoint:
-                loss_scaler.load_state_dict(checkpoint["scaler"])
-            if "curriculum" in checkpoint:
-                curriculum_scheduler.load_state_dict(checkpoint["curriculum"])
-                curriculum_scheduler.step(args.start_epoch, model)
-            lr_scheduler.step(args.start_epoch)
-
-    # vis = utils.TokenSkipVisualizer(
-    # model=model,
-    # device=device,
-    # dataset=dataset_val,
-    # num_samples=8,
-    # writer=writer,
-    # args=args,
-    # skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
-    # version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
-    # )
-    vis = Optional(None)
 
     print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
-    max_accuracy = 0.0
-    threshold = {}
-    try:
-        for epoch in range(args.start_epoch, args.epochs):
-            torch.cuda.reset_peak_memory_stats()
-            if args.distributed:
-                data_loader_train.sampler.set_epoch(epoch)
 
-            train_stats = train_one_epoch(
-                model,
-                criterion,
-                data_loader_train,
-                optimizer,
-                device,
-                epoch,
-                loss_scaler,
-                args.clip_grad,
-                model_ema,
-                mixup_fn,
-                set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
-                args=args,
-            )
-
-            if epoch == 200:
-                for name, module in model.named_modules():
-                    if "gcn_gate" in name and isinstance(module, GNN):
-                        module._selective_combination = True
-                        print("selective combiation activated")
-
-            curriculum_scheduler.step(epoch, model)
-
-            lr_scheduler.step(epoch)
-            writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
-            writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
-
-            if args.output_dir:
-                checkpoint_paths = [output_dir / "checkpoint.pth"]
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master(
-                        {
-                            "model": model_without_ddp.state_dict(),
-                            "optimizer": optimizer.state_dict(),
-                            "lr_scheduler": lr_scheduler.state_dict(),
-                            "epoch": epoch,
-                            "model_ema": get_state_dict(model_ema),
-                            "scaler": loss_scaler.state_dict(),
-                            "args": args,
-                            "curriculum": curriculum_scheduler.state_dict(),
-                        },
-                        checkpoint_path,
-                    )
-
-            test_stats = evaluate(data_loader_val, model, device, args)
-
-            writer.log_scalar(
-                "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
-            )
-
-            print(
-                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-            )
-
-            writer.log_scalar("train/loss", train_stats["loss"], epoch)
-            writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
-
-            if "loss_attn" in train_stats:
-                writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
-
-            if max_accuracy < test_stats["acc1"]:
-                # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-                max_accuracy = test_stats["acc1"]
-                if args.output_dir:
-                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
-                    for checkpoint_path in checkpoint_paths:
-                        utils.save_on_master(
-                            {
-                                "model": model_without_ddp.state_dict(),
-                                "optimizer": optimizer.state_dict(),
-                                "lr_scheduler": lr_scheduler.state_dict(),
-                                "epoch": epoch,
-                                "model_ema": get_state_dict(model_ema),
-                                "scaler": loss_scaler.state_dict(),
-                                "args": args,
-                                "curriculum": curriculum_scheduler.state_dict(),
-                            },
-                            checkpoint_path,
-                        )
-                if args.vis_enabled:
-                    vis.savefig(epoch)
-
-            print(f"Max accuracy: {max_accuracy:.2f}%")
-            writer.log_scalar("test/acc1/max", max_accuracy, epoch)
-
-            for name, m in model.named_modules():
-                if name.endswith(("dense_gate", "moe_gate")):
-                    if not m.disable:
-                        skip_ratio = m._skipped_tokens / m._total_tokens
-                        writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
-                        m._skipped_tokens = 0.0
-                        m._total_tokens = 0.0
-                        if hasattr(m, "group_size"):
-                            writer.log_scalar(
-                                f"receptive_size/{name}", m.group_size, epoch
-                            )
-                        # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
-
-            log_stats = {
-                **{f"train_{k}": v for k, v in train_stats.items()},
-                **{f"test_{k}": v for k, v in test_stats.items()},
-                "epoch": epoch,
-                "n_parameters": n_parameters,
-            }
-
-            if args.output_dir and utils.is_main_process():
-                with (output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-    except KeyboardInterrupt:
-        print("stopping experiment prematurely...")
-        print("performing evaluation at different thresholds")
-
-    eval_threshold_list = np.linspace(
-        start=1.0,
-        stop=args.target_threshold_dense,
-        num=int((1.0 - args.starting_threshold_dense) / args.eval_threshold_step + 1),
-        endpoint=True,
-    )
-
-    # for current_thresh in eval_threshold_list:
-
-    # for name, module in model_without_ddp.named_modules():
-    # if name.endswith("dense_gate"):
-    # module.step(current_thresh)
-    # elif name.endswith("moe_gate"):
-    # module.step(current_thresh)
-
-    # torch.cuda.reset_peak_memory_stats()
-    # test_stats = evaluate(data_loader_val, model, device, args)
-    # writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
-
-    # print(
-    # f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-    # )
-
-    # current_thresh -= args.eval_threshold_step
-
-    if args.distributed:
-        torch.distributed.barrier()
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print("Training time {}".format(total_time_str))
-    vis.savefig(args.epochs)
+    #################################
+    # insert class derived from pruning_stages/base.py here
+    # pruning / fine-tuning should be self-contained under that class
+    #################################
     writer.close()
 
 
