@@ -35,9 +35,6 @@ from datasets import train_val_split
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from models.gnn import GNN
-from models.resMoE import Gate
-from models.resMoE import GateMoE
 from samplers import RASampler
 from scheduler import CurriculumScheduler
 from utils import Optional
@@ -496,9 +493,7 @@ def get_args_parser():
     parser.add_argument(
         "--num-experts", type=int, default=32, help="number of experts for MoE layer"
     )
-    parser.add_argument(
-        "--gate", type=str, default="naive") 
-    )
+    parser.add_argument("--gate", type=str, default="naive")
 
     return parser
 
@@ -604,7 +599,7 @@ def main(args):
         drop_block_rate=None,
         img_size=args.input_size,
         num_experts=args.num_experts,
-        gate=args.gate
+        gate=args.gate,
     )
     # model = create_model(
     # args.model,
@@ -836,12 +831,6 @@ def main(args):
                 args=args,
             )
 
-            if epoch == 200:
-                for name, module in model.named_modules():
-                    if "gcn_gate" in name and isinstance(module, GNN):
-                        module._selective_combination = True
-                        print("selective combiation activated")
-
             curriculum_scheduler.step(epoch, model)
 
             lr_scheduler.step(epoch)
@@ -860,7 +849,6 @@ def main(args):
                             "model_ema": get_state_dict(model_ema),
                             "scaler": loss_scaler.state_dict(),
                             "args": args,
-                            "curriculum": curriculum_scheduler.state_dict(),
                         },
                         checkpoint_path,
                     )
@@ -896,7 +884,6 @@ def main(args):
                                 "model_ema": get_state_dict(model_ema),
                                 "scaler": loss_scaler.state_dict(),
                                 "args": args,
-                                "curriculum": curriculum_scheduler.state_dict(),
                             },
                             checkpoint_path,
                         )
@@ -905,19 +892,6 @@ def main(args):
 
             print(f"Max accuracy: {max_accuracy:.2f}%")
             writer.log_scalar("test/acc1/max", max_accuracy, epoch)
-
-            for name, m in model.named_modules():
-                if name.endswith(("dense_gate", "moe_gate")):
-                    if not m.disable:
-                        skip_ratio = m._skipped_tokens / m._total_tokens
-                        writer.log_scalar(f"skip_ratio/{name}", skip_ratio, epoch)
-                        m._skipped_tokens = 0.0
-                        m._total_tokens = 0.0
-                        if hasattr(m, "group_size"):
-                            writer.log_scalar(
-                                f"receptive_size/{name}", m.group_size, epoch
-                            )
-                        # writer.log_scalar(f"grad-{name}", train_stats[name], epoch)
 
             log_stats = {
                 **{f"train_{k}": v for k, v in train_stats.items()},

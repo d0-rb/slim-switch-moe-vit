@@ -130,7 +130,9 @@ def train_val_split(dataset, val_size=0.1, seed=0):
     targets = dataset.targets
     index = list(range(len(targets)))
 
-    train_index, val_index = split.split(index, targets)
+    train_index, val_index = None, None
+    for train_index, val_index in split.split(index, targets):
+        pass
     train_dataset = Subset(dataset, train_index)
     val_dataset = Subset(dataset, val_index)
 

@@ -20,3 +20,4 @@ imagenet
 .mypy_cache/*
 results*/
 ImageNet100/*
+pretrained/*
