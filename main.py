@@ -496,6 +496,9 @@ def get_args_parser():
     parser.add_argument(
         "--num-experts", type=int, default=32, help="number of experts for MoE layer"
     )
+    parser.add_argument(
+        "--gate", type=str, default="naive") 
+    )
 
     return parser
 
@@ -601,6 +604,7 @@ def main(args):
         drop_block_rate=None,
         img_size=args.input_size,
         num_experts=args.num_experts,
+        gate=args.gate
     )
     # model = create_model(
     # args.model,

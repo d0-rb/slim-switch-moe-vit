@@ -250,6 +250,7 @@ parser.add_argument(
 )
 parser.add_argument("--num-rep", default=14, type=int)
 parser.add_argument("--num_experts", default=32, type=int)
+parser.add_argument("--gate", default="naive", type=str)
 
 
 def timestamp(sync=False):
@@ -304,7 +305,6 @@ class BenchmarkRunner:
         self.model = eval(f"models.{model_name}")  # resvit_tiny_patch16_224_expert8_gcn
         self.model_name = self.model.__name__
         self.model = self.model(**kwargs)
-        __import__("pdb").set_trace()
 
         self.model.to(
             device=self.device,

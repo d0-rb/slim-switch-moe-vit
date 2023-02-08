@@ -7,6 +7,7 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 from fmoe import FMoETransformerMLP  # type: ignore[import]
+from fmoe.gates import GShardGate
 from fmoe.gates import NaiveGate  # type: ignore[import]
 from timm.models import register_model  # type: ignore[import]
 from torch.autograd import Variable
@@ -45,18 +46,7 @@ class CustomizedNaiveGate(NaiveGate):
         super().__init__(*args, **kwargs)
 
         self.register_buffer("expert_mapping", th.arange(self.tot_expert))
-
-    def forward(self, inp, return_all_scores=False):
-        gate = self.apply_expert_mapping(self.gate(inp))
-        gate_top_k_val, gate_top_k_idx = th.topk(
-            gate, k=self.top_k, dim=-1, largest=True, sorted=False
-        )  # [.. x top_k]
-        gate_top_k_val = gate_top_k_val.view(-1, self.top_k)
-        gate_score = F.softmax(gate_top_k_val, dim=-1)
-
-        if return_all_scores:
-            return gate_top_k_idx, gate_score, gate
-        return gate_top_k_idx, gate_score
+        self.gate.register_forward_hook(self.apply_expert_mapping)
 
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
@@ -65,9 +55,30 @@ class CustomizedNaiveGate(NaiveGate):
         assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
         self.expert_mapping.data.copy_(mapping.data)
 
-    def apply_expert_mapping(self, probability: th.Tensor):
-        probability = probability[:, self.expert_mapping]
-        return probability
+    def apply_expert_mapping(self, module, inputs, output):
+        output = output[:, self.expert_mapping]
+        return output
+
+
+class CustomizedGshardGate(GShardGate):
+    """fmoe's naive gate with experts mapping"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.register_buffer("expert_mapping", th.arange(self.tot_expert))
+        self.gate.register_forward_hook(self.apply_expert_mapping)
+
+    def set_expert_mapping(self, mapping: th.Tensor):
+        """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
+        value position"""
+        assert mapping.shape == self.expert_mapping.shape
+        assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
+        self.expert_mapping.data.copy_(mapping.data)
+
+    def apply_expert_mapping(self, module, inputs, output):
+        output = output[:, self.expert_mapping]
+        return output
 
 
 from .model import deit_tiny_patch16_224
@@ -75,71 +86,63 @@ from .model import deit_small_patch16_224
 from .model import deit_base_patch16_224
 
 
+def _make_moe(model, settings):
+    for name, module in model.named_modules():
+        if isinstance(module, Block):
+            module.mlp = CustomizedMoEMLP(
+                settings["embed_dim"],
+                settings["embed_dim"] * settings["mlp_ratio"],
+                moe_num_experts=settings["num_experts"],
+                moe_top_k=2,
+                drop=settings["drop_rate"],
+                gate=settings["gate"],
+            )
+    return model
+
+
 @register_model
-def moe_base_patch16_224(pretrained=False, **kwargs):
+def moe_base_patch16_224(pretrained=False, gate="naive", **kwargs):
     model = deit_base_patch16_224(pretrained=pretrained, **kwargs)
-    patch_size = 16
-    embed_dim = 768
-    depth = 12
-    num_heads = 12
-    mlp_ratio = 4
-    drop_rate = 0
-
-    for name, module in model.named_modules():
-        if isinstance(module, Block):
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=kwargs["num_experts"],
-                moe_top_k=2,
-                drop=drop_rate,
-                gate=CustomizedNaiveGate,
-            )
-    __import__("pdb").set_trace()
-    return model
+    settings = {
+        "patch_size": 16,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4,
+        "drop_rate": 0,
+        "num_experts": 32,
+        "gate": CustomizedNaiveGate if gate == "naive" else CustomizedGshardGate,
+    }
+    return _make_moe(model, settings)
 
 
 @register_model
-def moe_small_patch16_224(pretrained=False, **kwargs):
+def moe_small_patch16_224(pretrained=False, gate="naive", **kwargs):
     model = deit_small_patch16_224(pretrained=pretrained, **kwargs)
-    patch_size = 16
-    embed_dim = 384
-    depth = 12
-    num_heads = 6
-    mlp_ratio = 4
-    drop_rate = 0.0
-
-    for name, module in model.named_modules():
-        if isinstance(module, Block):
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=kwargs["num_experts"],
-                moe_top_k=2,
-                drop=drop_rate,
-                gate=CustomizedNaiveGate,
-            )
-    return model
+    settings = {
+        "patch_size": 16,
+        "embed_dim": 384,
+        "depth": 12,
+        "num_heads": 6,
+        "mlp_ratio": 4,
+        "drop_rate": 0.0,
+        "num_experts": 32,
+        "gate": CustomizedNaiveGate if gate == "naive" else CustomizedGshardGate,
+    }
+    return _make_moe(model, settings)
 
 
 @register_model
-def moe_tiny_patch16_224(pretrained=False, **kwargs):
+def moe_tiny_patch16_224(pretrained=False, gate="naive", **kwargs):
     model = deit_tiny_patch16_224(pretrained=pretrained, **kwargs)
-    patch_size = 16
-    embed_dim = 192
-    depth = 12
-    num_heads = 3
-    mlp_ratio = 4
-    drop_rate = 0.0
-
-    for name, module in model.named_modules():
-        if isinstance(module, Block):
-            module.mlp = CustomizedMoEMLP(
-                embed_dim,
-                embed_dim * mlp_ratio,
-                moe_num_experts=kwargs["num_experts"],
-                moe_top_k=2,
-                drop=drop_rate,
-                gate=CustomizedNaiveGate,
-            )
-    return model
+    settings = {
+        "patch_size": 16,
+        "embed_dim": 192,
+        "depth": 12,
+        "num_heads": 3,
+        "mlp_ratio": 4,
+        "drop_rate": 0.0,
+        "num_experts": 32,
+        "gate": CustomizedNaiveGate if gate == "naive" else CustomizedGshardGate,
+    }
+    return _make_moe(model, settings)
