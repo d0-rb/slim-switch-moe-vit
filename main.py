@@ -616,8 +616,6 @@ def main(args):
     # num_rep=args.num_rep,
     # )
 
-    curriculum_scheduler = Optional(None)  # CurriculumScheduler(args, writer)
-
     if args.finetune:
         if args.finetune.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -789,9 +787,6 @@ def main(args):
                 utils._load_checkpoint_for_ema(model_ema, checkpoint["model_ema"])
             if "scaler" in checkpoint:
                 loss_scaler.load_state_dict(checkpoint["scaler"])
-            if "curriculum" in checkpoint:
-                curriculum_scheduler.load_state_dict(checkpoint["curriculum"])
-                curriculum_scheduler.step(args.start_epoch, model)
             lr_scheduler.step(args.start_epoch)
 
     # vis = utils.TokenSkipVisualizer(
@@ -830,8 +825,6 @@ def main(args):
                 set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
                 args=args,
             )
-
-            curriculum_scheduler.step(epoch, model)
 
             lr_scheduler.step(epoch)
             writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)

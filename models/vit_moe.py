@@ -46,7 +46,7 @@ class CustomizedNaiveGate(NaiveGate):
         super().__init__(*args, **kwargs)
 
         self.register_buffer("expert_mapping", th.arange(self.tot_expert))
-        self.gate.register_forward_hook(self.apply_expert_mapping)
+        self.register_forward_hook(self.apply_expert_mapping)
 
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
@@ -55,9 +55,9 @@ class CustomizedNaiveGate(NaiveGate):
         assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
         self.expert_mapping.data.copy_(mapping.data)
 
-    def apply_expert_mapping(self, module, inputs, output):
-        output = output[:, self.expert_mapping]
-        return output
+    @staticmethod
+    def apply_expert_mapping(self, inputs, output):
+        return self.expert_mapping[output[0]], *output[1::]
 
 
 class CustomizedGshardGate(GShardGate):
@@ -67,7 +67,7 @@ class CustomizedGshardGate(GShardGate):
         super().__init__(*args, **kwargs)
 
         self.register_buffer("expert_mapping", th.arange(self.tot_expert))
-        self.gate.register_forward_hook(self.apply_expert_mapping)
+        self.register_forward_hook(self.apply_expert_mapping)
 
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
@@ -76,9 +76,9 @@ class CustomizedGshardGate(GShardGate):
         assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
         self.expert_mapping.data.copy_(mapping.data)
 
-    def apply_expert_mapping(self, module, inputs, output):
-        output = output[:, self.expert_mapping]
-        return output
+    @staticmethod
+    def apply_expert_mapping(self, inputs, output):
+        return self.expert_mapping[output[0]], *output[1::]
 
 
 from .model import deit_tiny_patch16_224
