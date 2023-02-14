@@ -47,6 +47,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser(
         "DeiT training and evaluation script", add_help=False
     )
+    parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--batch-size", default=64, type=int)
     parser.add_argument("--epochs", default=300, type=int)
     parser.add_argument("--bce-loss", action="store_true")
@@ -494,6 +495,8 @@ def get_args_parser():
         "--num-experts", type=int, default=32, help="number of experts for MoE layer"
     )
     parser.add_argument("--gate", type=str, default="naive")
+    parser.add_argument("--load-balance-scale", type=float, default=1e-1)
+    parser.add_argument("--validation-size", type=float, default=0.1)
 
     return parser
 
@@ -525,7 +528,9 @@ def main(args):
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
 
-    dataset_train, _ = train_val_split(dataset_train, val_size=0.1, seed=args.seed)
+    dataset_train, _ = train_val_split(
+        dataset_train, val_size=args.validation_size, seed=args.seed
+    )
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
     if True:  # args.distributed:
@@ -592,7 +597,7 @@ def main(args):
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
-        pretrained=False,
+        pretrained=args.pretrained,
         num_classes=args.nb_classes,
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
@@ -601,20 +606,6 @@ def main(args):
         num_experts=args.num_experts,
         gate=args.gate,
     )
-    # model = create_model(
-    # args.model,
-    # pretrained=False,
-    # num_classes=args.nb_classes,
-    # drop_rate=args.drop,
-    # drop_path_rate=args.drop_path,
-    # drop_block_rate=None,
-    # img_size=args.input_size,
-    # starting_threshold_dense=args.starting_threshold_dense,
-    # target_threshold_dense=args.target_threshold_dense,
-    # starting_threshold_moe=args.starting_threshold_moe,
-    # target_threshold_moe=args.target_threshold_moe,
-    # num_rep=args.num_rep,
-    # )
 
     if args.finetune:
         if args.finetune.startswith("https"):
@@ -799,7 +790,6 @@ def main(args):
     # skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
     # version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
     # )
-    vis = Optional(None)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -846,7 +836,7 @@ def main(args):
                         checkpoint_path,
                     )
 
-            test_stats = evaluate(data_loader_val, model, device, args)
+            test_stats = evaluate(data_loader_val, model, device)
 
             writer.log_scalar(
                 "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
@@ -880,8 +870,6 @@ def main(args):
                             },
                             checkpoint_path,
                         )
-                if args.vis_enabled:
-                    vis.savefig(epoch)
 
             print(f"Max accuracy: {max_accuracy:.2f}%")
             writer.log_scalar("test/acc1/max", max_accuracy, epoch)
@@ -930,7 +918,6 @@ def main(args):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Training time {}".format(total_time_str))
-    vis.savefig(args.epochs)
     writer.close()
 
 

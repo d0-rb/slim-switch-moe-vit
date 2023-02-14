@@ -15,7 +15,7 @@ port=$((9000 + RANDOM % 1000))
 model="moe_tiny_patch16_224"
 lr="1e-3"
 start_threshold="0.5"
-dataset="IMNET100"
+dataset="IMNET"
 n=0  # seed
 validation_size=0.1
 
@@ -31,5 +31,4 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cud
                 --gate $gate --pretrained \
 		--validation-size $validation_size \
                 --output_dir \
-		pretrained/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/${n}\
-		#test/
+		pretrained/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/val_${validation_size}/${n}\

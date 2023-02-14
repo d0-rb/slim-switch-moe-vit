@@ -35,12 +35,11 @@ from datasets import train_val_split
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from models.gnn import GNN
-from models.resMoE import Gate
-from models.resMoE import GateMoE
+from pruning_stages import DropTokens
+from pruning_stages import ExpertDropping
+from pruning_stages import ExpertMerging
 from samplers import RASampler
 from scheduler import CurriculumScheduler
-from utils import Optional
 from utils import TensorboardXTracker
 
 # import models_v2
@@ -339,7 +338,9 @@ def get_args_parser():
     parser.add_argument("--distillation-tau", default=1.0, type=float, help="")
 
     # * Finetuning params
-    parser.add_argument("--finetune", default="", help="finetune from checkpoint")
+    parser.add_argument(
+        "--finetune", default="", help="finetune from checkpoint", required=True
+    )
     parser.add_argument("--attn-only", action="store_true")
 
     # Dataset parameters
@@ -381,7 +382,9 @@ def get_args_parser():
     )
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument(
-        "--resume", default="", help="resume from checkpoint", required=True
+        "--resume",
+        default="",
+        help="resume from checkpoint",
     )
     parser.add_argument(
         "--start_epoch", default=0, type=int, metavar="N", help="start epoch"
@@ -507,6 +510,11 @@ def get_args_parser():
     parser.add_argument(
         "--experts-merge", type=int, default=32, help="number of experts for MoE layer"
     )
+    parser.add_argument("--validation-size", type=float, default=0.1)
+
+    ExpertMerging.get_parser(parser)
+    ExpertDropping.get_parser(parser)
+    DropTokens.get_parser(parser)
 
     return parser
 
@@ -630,8 +638,6 @@ def main(args):
         num_experts=args.num_experts,
     )
 
-    curriculum_scheduler = Optional(None)  # CurriculumScheduler(args, writer)
-
     model.to(device)
 
     model_without_ddp = model
@@ -690,12 +696,54 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"])
 
+    # example declaration feel free to chang anything
+    expert_merging = ExpertMerging(
+        model=model,
+        trainloader=data_loader_train,
+        valloader=data_loader_val,
+        testloader=data_loader_test,
+        criterion=criterion,
+        args=args,
+        writer=writer,
+        loss_scaler=loss_scaler,
+        optimizer=optimizer,
+    )
+    expert_dropping = ExpertDropping(
+        model=model,
+        trainloader=data_loader_train,
+        valloader=data_loader_val,
+        testloader=data_loader_test,
+        criterion=criterion,
+        args=args,
+        writer=writer,
+        loss_scaler=loss_scaler,
+        optimizer=optimizer,
+    )
+    token_merge = DropTokens(
+        model=model,
+        trainloader=data_loader_train,
+        valloader=data_loader_val,
+        testloader=data_loader_test,
+        criterion=criterion,
+        args=args,
+        writer=writer,
+        loss_scaler=loss_scaler,
+        optimizer=optimizer,
+    )
+
     print(f"Start training for {args.epochs} epochs")
 
     #################################
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
     #################################
+    __import__("pdb").set_trace()
+    print(args.foo_1)
+
+    expert_merging.main()
+    expert_dropping.main()
+    token_merge.main()
+
     writer.close()
 
 

@@ -57,6 +57,11 @@ class CustomizedNaiveGate(NaiveGate):
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
+        # [0,1,2,3,4,5,6]
+        # [1,1,1,0,5,0,0]
+        # output[0] = Tokes x topk
+        # [[3,2], [5, 6]] -> [[0,1], [0,0]]
+        # -1 -> skipped processing
         return self.expert_mapping[output[0]], *output[1::]
 
 
@@ -86,17 +91,37 @@ from .model import deit_small_patch16_224
 from .model import deit_base_patch16_224
 
 
-def _make_moe(model, settings):
+def _make_moe(model, settings, pretrained=False):
+    cnt = 0
     for name, module in model.named_modules():
         if isinstance(module, Block):
-            module.mlp = CustomizedMoEMLP(
-                settings["embed_dim"],
-                settings["embed_dim"] * settings["mlp_ratio"],
-                moe_num_experts=settings["num_experts"],
-                moe_top_k=2,
-                drop=settings["drop_rate"],
-                gate=settings["gate"],
-            )
+            if cnt % 2 == 0:
+                fc1 = module.mlp.fc1
+                fc2 = module.mlp.fc2
+
+                module.mlp = CustomizedMoEMLP(
+                    settings["embed_dim"],
+                    settings["embed_dim"] * settings["mlp_ratio"],
+                    moe_num_experts=settings["num_experts"],
+                    moe_top_k=2,
+                    drop=settings["drop_rate"],
+                    gate=settings["gate"],
+                )
+                if pretrained:
+                    with th.no_grad():
+                        module.mlp.experts.htoh4.weight.data.copy_(
+                            fc1.weight.tile(settings["num_experts"], 1, 1)
+                        )
+                        module.mlp.experts.htoh4.bias.data.copy_(
+                            fc1.bias.tile(settings["num_experts"], 1)
+                        )
+                        module.mlp.experts.h4toh.weight.data.copy_(
+                            fc2.weight.tile(settings["num_experts"], 1, 1)
+                        )
+                        module.mlp.experts.h4toh.bias.data.copy_(
+                            fc2.bias.tile(settings["num_experts"], 1)
+                        )
+            cnt += 1
     return model
 
 
@@ -110,10 +135,10 @@ def moe_base_patch16_224(pretrained=False, gate="naive", **kwargs):
         "num_heads": 12,
         "mlp_ratio": 4,
         "drop_rate": 0,
-        "num_experts": 32,
+        "num_experts": kwargs.get("num_experts", 32),
         "gate": CustomizedNaiveGate if gate == "naive" else CustomizedGshardGate,
     }
-    return _make_moe(model, settings)
+    return _make_moe(model, settings, pretrained)
 
 
 @register_model
@@ -126,10 +151,10 @@ def moe_small_patch16_224(pretrained=False, gate="naive", **kwargs):
         "num_heads": 6,
         "mlp_ratio": 4,
         "drop_rate": 0.0,
-        "num_experts": 32,
+        "num_experts": kwargs.get("num_experts", 32),
         "gate": CustomizedNaiveGate if gate == "naive" else CustomizedGshardGate,
     }
-    return _make_moe(model, settings)
+    return _make_moe(model, settings, pretrained)
 
 
 @register_model
@@ -142,7 +167,7 @@ def moe_tiny_patch16_224(pretrained=False, gate="naive", **kwargs):
         "num_heads": 3,
         "mlp_ratio": 4,
         "drop_rate": 0.0,
-        "num_experts": 32,
+        "num_experts": kwargs.get("num_experts", 32),
         "gate": CustomizedNaiveGate if gate == "naive" else CustomizedGshardGate,
     }
-    return _make_moe(model, settings)
+    return _make_moe(model, settings, pretrained)

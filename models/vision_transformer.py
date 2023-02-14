@@ -274,10 +274,6 @@ class Attention(nn.Module):
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        # if self.training:
-        self.attn = attn
-        self.x_cls_attn = attn[:, :, 0, :]  # [B x H x 1 x N]
-
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -764,11 +760,6 @@ class VisionTransformer(nn.Module):
             if num_classes > 0
             else nn.Identity()
         )
-        self.head_cls = (
-            nn.Linear(self.num_features, num_classes)
-            if num_classes > 0
-            else nn.Identity()
-        )
         self.head_dist = None
         if distilled:
             self.head_dist = (
@@ -817,9 +808,6 @@ class VisionTransformer(nn.Module):
         self.head = (
             nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         )
-        self.head_cls = (
-            nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        )
         if self.num_tokens == 2:
             self.head_dist = (
                 nn.Linear(self.embed_dim, self.num_classes)
@@ -841,35 +829,23 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x + self.pos_embed)
         x = self.blocks(x)
         x = self.norm(x)
-
-        x_cls = x[:, 0, ::]
-        x_patch = x[:, 1::, ::].mean(dim=1)
-
-        return x_cls, x_patch
-
-        # if self.dist_token is None:
-        # return self.pre_logits(x[:, 0])
-        # else:
-        # return x[:, 0], x[:, 1]
+        if self.dist_token is None:
+            return self.pre_logits(x[:, 0])
+        else:
+            return x[:, 0], x[:, 1]
 
     def forward(self, x):
         x = self.forward_features(x)
-        x_cls, x_patch = x
-        if self.training:
-            return self.head(x_patch), self.head_cls(x_cls)
+        if self.head_dist is not None:
+            x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
+            if self.training and not torch.jit.is_scripting():
+                # during inference, return the average of both classifier predictions
+                return x, x_dist
+            else:
+                return (x + x_dist) / 2
         else:
-            return self.head(x_patch)
-
-        # if self.head_dist is not None:
-        # x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
-        # if self.training and not torch.jit.is_scripting():
-        # # during inference, return the average of both classifier predictions
-        # return x, x_dist
-        # else:
-        # return (x + x_dist) / 2
-        # else:
-        # x = self.head(x)
-        # return x
+            x = self.head(x)
+        return x
 
 
 def _init_vit_weights(

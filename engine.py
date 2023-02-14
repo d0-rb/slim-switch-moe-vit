@@ -5,23 +5,18 @@
 """
 Train and eval functions used in main.py
 """
-from __future__ import annotations
-
 import math
 import sys
-import typing as typ
 from typing import Iterable
 from typing import Optional
 
 import torch
-import torch as th
 from timm.data import Mixup
 from timm.utils import accuracy
 from timm.utils import ModelEma
 
 import utils
 from losses import DistillationLoss
-from models.resMoE import Gate
 from models.vision_transformer import Block
 
 
@@ -57,26 +52,22 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast():
             outputs = model(samples)
-            loss = criterion(samples, outputs[0], targets)
-            loss += criterion(samples, outputs[1], targets)
-            loss = loss / 2.0
-
-        loss_attn: typ.List[typ.Any] = []  # mypy keep yelling at me
-        # loss_attn should be a list of tensor
-        for name, module in model.named_modules():
-            if isinstance(module, Block) and hasattr(module, "attn_loss"):
-                loss_attn.append(module.attn_loss)
-
-        if len(loss_attn) > 0:
-            loss_attn_value: th.Tensor = sum(loss_attn) / len(loss_attn)
-            loss = loss + loss_attn_value
+            loss = criterion(samples, outputs, targets)
+            loss_gate = 0
+            gate_cnt = 0
+            for name, m in model.named_modules():
+                if isinstance(m, (Block)) and hasattr(m.mlp, "gate"):
+                    if m.mlp.gate.has_loss:
+                        loss_gate += m.mlp.gate.get_loss()
+                        gate_cnt += 1
+            loss_gate = loss_gate / max(gate_cnt, 1.0)  # prevent 0 division error
+            loss = loss + args.load_balance_scale * loss_gate
 
         loss_value = loss.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
-            continue
-            # sys.exit(1)
+            sys.exit(1)
 
         optimizer.zero_grad()
 
@@ -84,12 +75,6 @@ def train_one_epoch(
         is_second_order = (
             hasattr(optimizer, "is_second_order") and optimizer.is_second_order
         )
-        # loss.backward()
-        # for name, module in model.named_modules():
-        # if isinstance(module, (Gate)) and "dense_gate" in name:
-        # print(f"{name=} {module.head[1].weight.grad.norm()}")
-        # print(loss.item())
-        # optimizer.step()
         loss_scaler(
             loss,
             optimizer,
@@ -102,14 +87,8 @@ def train_one_epoch(
         if model_ema is not None:
             model_ema.update(model)
 
-        if len(loss_attn) > 0:
-            metric_logger.update(loss_attn=loss_attn_value.item())
-
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-
-        if args.debug:
-            break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -117,8 +96,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, args):
-
+def evaluate(data_loader, model, device):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -128,7 +106,6 @@ def evaluate(data_loader, model, device, args):
     model.eval()
 
     for images, target in metric_logger.log_every(data_loader, 10, header):
-
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
@@ -143,9 +120,6 @@ def evaluate(data_loader, model, device, args):
         metric_logger.update(loss=loss.item())
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
-
-        if args.debug:
-            break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print(
