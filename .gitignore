@@ -21,3 +21,4 @@ imagenet
 results*/
 ImageNet100/*
 pretrained/*
+finetuned/*

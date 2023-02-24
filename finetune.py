@@ -36,7 +36,7 @@ from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
 from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping
+from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping
 from pruning_stages import ExpertMerging
 from samplers import RASampler
 from scheduler import CurriculumScheduler
@@ -501,16 +501,18 @@ def get_args_parser():
     parser.add_argument(
         "--num-experts", type=int, default=32, help="number of experts for MoE layer"
     )
-    parser.add_argument(
-        "--experts-dropout",
-        type=int,
-        default=32,
-        help="number of experts for MoE layer",
-    )
+    # parser.add_argument(
+    #     "--experts-dropout",
+    #     type=float,
+    #     default=0.9,
+    #     help="sparsity rate of experts for expert dropping",
+    # )
     parser.add_argument(
         "--experts-merge", type=int, default=32, help="number of experts for MoE layer"
     )
     parser.add_argument("--validation-size", type=float, default=0.1)
+    parser.add_argument("--gate", type=str, default="naive")
+    parser.add_argument("--load-balance-scale", type=float, default=1e-1)
 
     ExpertMerging.get_parser(parser)
     ExpertDropping.get_parser(parser)
@@ -560,9 +562,15 @@ def main(args):
             sampler_train = RASampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+            sampler_val = RASampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
         else:
             sampler_train = torch.utils.data.DistributedSampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
+            sampler_val = torch.utils.data.DistributedSampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
         if args.dist_eval:
             if len(dataset_test) % num_tasks != 0:
@@ -594,7 +602,7 @@ def main(args):
     )
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val,
-        sampler=sampler_train,
+        sampler=sampler_val,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -636,9 +644,63 @@ def main(args):
         drop_block_rate=None,
         img_size=args.input_size,
         num_experts=args.num_experts,
+        gate=args.gate,
     )
 
+    if args.finetune:
+        if args.finetune.startswith("https"):
+            checkpoint = torch.hub.load_state_dict_from_url(
+                args.finetune, map_location="cpu", check_hash=True
+            )
+        else:
+            checkpoint = torch.load(args.finetune, map_location="cpu")
+
+        checkpoint_model = checkpoint["model"]
+        state_dict = model.state_dict()
+        for k in ["head.weight", "head.bias", "head_dist.weight", "head_dist.bias"]:
+            if (
+                k in checkpoint_model
+                and checkpoint_model[k].shape != state_dict[k].shape
+            ):
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
+
+        # interpolate position embedding
+        pos_embed_checkpoint = checkpoint_model["pos_embed"]
+        embedding_size = pos_embed_checkpoint.shape[-1]
+        num_patches = model.patch_embed.num_patches
+        num_extra_tokens = model.pos_embed.shape[-2] - num_patches
+        # height (== width) for the checkpoint position embedding
+        orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
+        # height (== width) for the new position embedding
+        new_size = int(num_patches**0.5)
+        # class_token and dist_token are kept unchanged
+        extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
+        # only the position tokens are interpolated
+        pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
+        pos_tokens = pos_tokens.reshape(
+            -1, orig_size, orig_size, embedding_size
+        ).permute(0, 3, 1, 2)
+        pos_tokens = torch.nn.functional.interpolate(
+            pos_tokens, size=(new_size, new_size), mode="bicubic", align_corners=False
+        )
+        pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
+        new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+        checkpoint_model["pos_embed"] = new_pos_embed
+
+        model.load_state_dict(checkpoint_model, strict=False)
+
     model.to(device)
+
+    model_ema = None
+    if args.model_ema:
+        # meanportant to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        model_ema = ModelEma(
+            model,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else "",
+            resume="",
+        )
 
     model_without_ddp = model
     if args.distributed:
@@ -670,7 +732,7 @@ def main(args):
 
     loss_scaler = NativeScaler()
 
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    lr_scheduler, _ = create_scheduler(args, optimizer) if args.epochs > 0 else (None, 0)
 
     if mixup_active:
         # smoothing is handled with mixup label transform
@@ -684,8 +746,16 @@ def main(args):
         criterion = torch.nn.BCEWithLogitsLoss()
 
     teacher_model = None
+
     # wrap the criterion in our custom DistillationLoss, which
     # just dispatches to the original criterion if args.distillation_type is 'none'
+    criterion = DistillationLoss(
+        criterion,
+        teacher_model,
+        args.distillation_type,
+        args.distillation_alpha,
+        args.distillation_tau,
+    )
 
     if args.resume:
         if args.resume.startswith("https"):
@@ -697,7 +767,20 @@ def main(args):
         model_without_ddp.load_state_dict(checkpoint["model"])
 
     # example declaration feel free to chang anything
-    expert_merging = ExpertMerging(
+    # expert_merging = ExpertMerging(
+    #     model=model,
+    #     trainloader=data_loader_train,
+    #     valloader=data_loader_val,
+    #     testloader=data_loader_test,
+    #     criterion=criterion,
+    #     args=args,
+    #     writer=writer,
+    #     loss_scaler=loss_scaler,
+    #     optimizer=optimizer,
+    # )
+    # expert_dropping = NormDropping(
+    expert_dropping = VolumeDropping(
+    # expert_dropping = RandomDropping(
         model=model,
         trainloader=data_loader_train,
         valloader=data_loader_val,
@@ -707,29 +790,21 @@ def main(args):
         writer=writer,
         loss_scaler=loss_scaler,
         optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        model_ema=model_ema,
+        mixup_fn=mixup_fn,
     )
-    expert_dropping = ExpertDropping(
-        model=model,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-    )
-    token_merge = DropTokens(
-        model=model,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-    )
+    # token_merge = DropTokens(
+    #     model=model,
+    #     trainloader=data_loader_train,
+    #     valloader=data_loader_val,
+    #     testloader=data_loader_test,
+    #     criterion=criterion,
+    #     args=args,
+    #     writer=writer,
+    #     loss_scaler=loss_scaler,
+    #     optimizer=optimizer,
+    # )
 
     print(f"Start training for {args.epochs} epochs")
 
@@ -737,12 +812,13 @@ def main(args):
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
     #################################
-    __import__("pdb").set_trace()
-    print(args.foo_1)
+    # __import__("pdb").set_trace()
 
-    expert_merging.main()
+    # expert_merging.main()
     expert_dropping.main()
-    token_merge.main()
+    # token_merge.main()
+
+    test_stats = evaluate(data_loader_test, model, device)
 
     writer.close()
 

@@ -52,7 +52,7 @@ class CustomizedNaiveGate(NaiveGate):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
         value position"""
         assert mapping.shape == self.expert_mapping.shape
-        assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
+        assert th.max(mapping) < self.tot_expert and th.min(mapping) >= -1
         self.expert_mapping.data.copy_(mapping.data)
 
     @staticmethod
@@ -78,7 +78,7 @@ class CustomizedGshardGate(GShardGate):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
         value position"""
         assert mapping.shape == self.expert_mapping.shape
-        assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
+        assert th.max(mapping) < self.tot_expert and th.min(mapping) >= -1
         self.expert_mapping.data.copy_(mapping.data)
 
     @staticmethod
