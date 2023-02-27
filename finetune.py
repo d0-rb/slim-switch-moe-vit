@@ -36,7 +36,7 @@ from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
 from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping
+from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping
 from pruning_stages import ExpertMerging
 from samplers import RASampler
 from scheduler import CurriculumScheduler
@@ -523,8 +523,8 @@ def get_args_parser():
 
 def main(args):
     utils.init_distributed_mode(args)
-    if args.distributed:
-        raise NotImplementedError
+    # if args.distributed:
+    #     raise NotImplementedError('No distributed!')
 
     print(args)
 
@@ -572,7 +572,7 @@ def main(args):
             sampler_val = torch.utils.data.DistributedSampler(
                 dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
-        if args.dist_eval:
+        if args.dist_eval or args.distributed:
             if len(dataset_test) % num_tasks != 0:
                 print(
                     "Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. "
@@ -581,9 +581,6 @@ def main(args):
                 )
             sampler_test = torch.utils.data.DistributedSampler(
                 dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False
-            )
-            sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
             )
         else:
             sampler_test = torch.utils.data.SequentialSampler(dataset_test)
@@ -768,7 +765,7 @@ def main(args):
 
     # example declaration feel free to chang anything
     # expert_merging = ExpertMerging(
-    #     model=model,
+    #     model=model_without_ddp,
     #     trainloader=data_loader_train,
     #     valloader=data_loader_val,
     #     testloader=data_loader_test,
@@ -778,10 +775,11 @@ def main(args):
     #     loss_scaler=loss_scaler,
     #     optimizer=optimizer,
     # )
+    ExpertDropping = MeanShiftDropping(
     # expert_dropping = NormDropping(
-    expert_dropping = VolumeDropping(
+    # expert_dropping = VolumeDropping(
     # expert_dropping = RandomDropping(
-        model=model,
+        model=model_without_ddp,
         trainloader=data_loader_train,
         valloader=data_loader_val,
         testloader=data_loader_test,
@@ -795,7 +793,7 @@ def main(args):
         mixup_fn=mixup_fn,
     )
     # token_merge = DropTokens(
-    #     model=model,
+    #     model=model_without_ddp,
     #     trainloader=data_loader_train,
     #     valloader=data_loader_val,
     #     testloader=data_loader_test,

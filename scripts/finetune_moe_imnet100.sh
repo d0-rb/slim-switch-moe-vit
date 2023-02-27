@@ -1,7 +1,7 @@
 #!/bin/bash
 read -p 'cuda: ' cuda
 # read -p 'data path: ' datapath
-# read -p 'batch size: ' batchsize
+read -p 'batch size: ' batchsize
 # read -p 'gate: ' gate
 # read -p 'num-experts: ' num_experts
 read -p 'epochs: ' epochs
@@ -9,8 +9,6 @@ read -p 'n: ' n
 
 num_comma=`echo ${cuda} | tr -cd , | wc -c`
 num_cuda=$((${num_comma} + 1))
-echo $num_cuda
-echo $num_comma
 
 port=$((9000 + RANDOM % 1000))
 model="moe_tiny_patch16_224"
@@ -21,15 +19,15 @@ validation_size=0.1
 datapath="../ImageNet100"
 # gate="naive"
 num_experts="32"
-batchsize="1024"
+# batchsize="256"
 # epochs="1"
 
-# NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port finetune.py --model $model --data-set $dataset \
-for gate in "naive" "gshard";
+for gate in "gshard" "naive";
 do
     for keeprate in "0.9" "0.8" "0.7" "0.6" "0.5" "0.4" "0.3" "0.2" "0.1";
     do
-        CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset \
+        # CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset \
+        NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port finetune.py --model $model --data-set $dataset \
                 --unscale-lr \
                 --data-path $datapath --batch $batchsize \
                 --lr $lr --epochs $epochs --weight-decay 0.05 --sched cosine --input-size 224 \
@@ -43,6 +41,6 @@ do
                 --finetune \
                 pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_600/experts_${num_experts}/0/best_checkpoint.pth \
                 --output_dir \
-                finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/volume/keeprate_${keeprate}/${n}
+                finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/meanshift/keeprate_${keeprate}/${n}
     done
 done

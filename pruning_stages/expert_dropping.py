@@ -242,13 +242,11 @@ class VolumeDropping(ExpertDropping):
         self.expert_volume += top_k_scattered.sum(dim=[i for i in range(len(top_k_idx.shape) - 1)])  # sum over all except last (expert) dimension, [B*T, experts] -> [experts]
 
 
-
 # run validation on model and record mean norm of each expert output, then drop lowest-norm experts
 class NormDropping(ExpertDropping):
-    def __init__(self, *args, valloader, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.valLoader = valloader
         self.total_experts = 0
         self.moes = {}
         
@@ -313,6 +311,96 @@ class NormDropping(ExpertDropping):
 
                 if batch_size > 0:
                     self.expert_norm[i] = self.expert_norm[i] * (old_num_forwards / self.num_forwards[i]) + expert_out.norm(dim=-1, p=2).mean() * (batch_size / self.num_forwards[i])
+
+                base_idx += batch_size
+            
+            return experts_out
+        
+        if isinstance(fwd_expert_count, th.Tensor):
+            fwd_expert_count = fwd_expert_count.cpu().numpy()
+        outputs = []
+        base_idx = 0
+        for i in range(self.num_expert):
+            batch_size = fwd_expert_count[i]
+            inp_slice = inp[base_idx : base_idx + batch_size]
+            outputs.append(self.experts[i](inp_slice))
+            base_idx += batch_size
+
+        return th.cat(outputs, dim=0)
+
+
+# run validation on model and record mean norm of each expert output, then drop lowest-norm experts
+class MeanShiftDropping(ExpertDropping):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.total_experts = 0
+        self.moes = {}
+        
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedMoEMLP):
+                module.register_buffer('input_mean', th.zeros((module.num_expert, self.model.embed_dim), device=self.device))
+                module.register_buffer('expert_mean', th.full((module.num_expert, self.model.embed_dim), th.finfo().max, device=self.device))
+                module.register_buffer('num_forwards', th.zeros((module.num_expert), device=self.device))
+                
+                self.total_experts += module.num_expert
+
+                old_expert_fn = module.expert_fn
+                
+                bound_method = self.expert_fn.__get__(
+                    module, module.__class__
+                )
+                setattr(module, "expert_fn", bound_method)
+
+                self.moes[name] = (module, old_expert_fn)
+
+    def drop(self, keep_rate: float | int, model: nn.Module):
+        num_dropped = int(self.total_experts * (1 - keep_rate))
+
+        self.model.eval()
+        for samples, targets in self.valLoader:
+            samples = samples.to(self.device, non_blocking=True)
+            # targets = targets.to(self.device, non_blocking=True)
+
+            with th.no_grad():
+                outputs = model(samples)
+
+        expert_mean_modules = []
+        expert_mean_shifts = th.zeros((0,), device=self.device)
+        for name, (moe, old_expert_fn) in self.moes.items():
+            expert_mean_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
+            expert_mean_shifts = th.cat((expert_mean_shifts, (moe.expert_mean - moe.input_mean).norm(dim=-1, p=2)), dim=0)
+            setattr(moe, "expert_fn", old_expert_fn)
+        
+        # drop experts with highest mean shifts
+        dropped_experts = th.argsort(expert_mean_shifts)[:num_dropped]
+        for dropped_expert in dropped_experts:
+            moe, expert = expert_mean_modules[dropped_expert]
+            moe.gate.expert_mapping[expert] = -1
+        
+        print(f'dropped {num_dropped} experts out of {self.total_experts}')
+        print(f'dropped expert mean shift norm: {expert_mean_shifts[dropped_experts]}')
+    
+    @staticmethod
+    def expert_fn(self, inp, fwd_expert_count):
+        r"""
+        The default expert function which either calls the experts as a whole
+        or as separate experts.
+        """
+        if self.experts_fused:
+            experts_out = self.experts(inp, fwd_expert_count)
+            
+            base_idx = 0
+            for i in range(self.num_expert):
+                batch_size = fwd_expert_count[i]
+                old_num_forwards = self.num_forwards[i]
+                self.num_forwards[i] += batch_size
+                expert_in = inp[base_idx : base_idx + batch_size]
+                expert_out = experts_out[base_idx : base_idx + batch_size]
+
+                if batch_size > 0:
+                    self.expert_mean[i] = self.expert_mean[i] * (old_num_forwards / self.num_forwards[i]) + expert_out.mean(dim=(0,1)) * (batch_size / self.num_forwards[i])
+                    self.input_mean[i] = self.input_mean[i] * (old_num_forwards / self.num_forwards[i]) + expert_in.mean(dim=(0,1)) * (batch_size / self.num_forwards[i])
 
                 base_idx += batch_size
             
