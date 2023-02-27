@@ -775,7 +775,7 @@ def main(args):
     #     loss_scaler=loss_scaler,
     #     optimizer=optimizer,
     # )
-    ExpertDropping = MeanShiftDropping(
+    expert_dropping = MeanShiftDropping(
     # expert_dropping = NormDropping(
     # expert_dropping = VolumeDropping(
     # expert_dropping = RandomDropping(
