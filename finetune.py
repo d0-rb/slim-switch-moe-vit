@@ -36,7 +36,7 @@ from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
 from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping
+from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping, CosineSimilarityDropping
 from pruning_stages import ExpertMerging
 from samplers import RASampler
 from scheduler import CurriculumScheduler
@@ -775,7 +775,8 @@ def main(args):
     #     loss_scaler=loss_scaler,
     #     optimizer=optimizer,
     # )
-    expert_dropping = MeanShiftDropping(
+    expert_dropping = CosineSimilarityDropping(
+    # expert_dropping = MeanShiftDropping(
     # expert_dropping = NormDropping(
     # expert_dropping = VolumeDropping(
     # expert_dropping = RandomDropping(

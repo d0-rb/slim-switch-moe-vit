@@ -41,6 +41,6 @@ do
                 --finetune \
                 pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_600/experts_${num_experts}/0/best_checkpoint.pth \
                 --output_dir \
-                finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/meanshift/keeprate_${keeprate}/${n}
+                finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/cosinesim/keeprate_${keeprate}/${n}
     done
 done

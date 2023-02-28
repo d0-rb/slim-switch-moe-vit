@@ -3,6 +3,7 @@ import argparse
 import json
 import torch as th
 import torch.nn as nn
+import torch.nn.functional as F
 import time
 import datetime
 from timm.utils import get_state_dict  # type: ignore[import]
@@ -329,7 +330,7 @@ class NormDropping(ExpertDropping):
         return th.cat(outputs, dim=0)
 
 
-# run validation on model and record mean norm of each expert output, then drop lowest-norm experts
+# run validation on model and record mean expert output, then drop experts that shifted mean the least
 class MeanShiftDropping(ExpertDropping):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -340,7 +341,7 @@ class MeanShiftDropping(ExpertDropping):
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedMoEMLP):
                 module.register_buffer('input_mean', th.zeros((module.num_expert, self.model.embed_dim), device=self.device))
-                module.register_buffer('expert_mean', th.full((module.num_expert, self.model.embed_dim), th.finfo().max, device=self.device))
+                module.register_buffer('expert_mean', th.zeros((module.num_expert, self.model.embed_dim), device=self.device))
                 module.register_buffer('num_forwards', th.zeros((module.num_expert), device=self.device))
                 
                 self.total_experts += module.num_expert
@@ -372,7 +373,7 @@ class MeanShiftDropping(ExpertDropping):
             expert_mean_shifts = th.cat((expert_mean_shifts, (moe.expert_mean - moe.input_mean).norm(dim=-1, p=2)), dim=0)
             setattr(moe, "expert_fn", old_expert_fn)
         
-        # drop experts with highest mean shifts
+        # drop experts with lowest mean shifts
         dropped_experts = th.argsort(expert_mean_shifts)[:num_dropped]
         for dropped_expert in dropped_experts:
             moe, expert = expert_mean_modules[dropped_expert]
@@ -399,8 +400,101 @@ class MeanShiftDropping(ExpertDropping):
                 expert_out = experts_out[base_idx : base_idx + batch_size]
 
                 if batch_size > 0:
-                    self.expert_mean[i] = self.expert_mean[i] * (old_num_forwards / self.num_forwards[i]) + expert_out.mean(dim=(0,1)) * (batch_size / self.num_forwards[i])
-                    self.input_mean[i] = self.input_mean[i] * (old_num_forwards / self.num_forwards[i]) + expert_in.mean(dim=(0,1)) * (batch_size / self.num_forwards[i])
+                    if old_num_forwards == 0:
+                        self.expert_mean[i] = expert_out.mean(dim=0)
+                        self.input_mean[i] = expert_in.mean(dim=0)
+                    else:
+                        self.expert_mean[i] = self.expert_mean[i] * (old_num_forwards / self.num_forwards[i]) + expert_out.mean(dim=0) * (batch_size / self.num_forwards[i])
+                        self.input_mean[i] = self.input_mean[i] * (old_num_forwards / self.num_forwards[i]) + expert_in.mean(dim=0) * (batch_size / self.num_forwards[i])
+
+                base_idx += batch_size
+            
+            return experts_out
+        
+        if isinstance(fwd_expert_count, th.Tensor):
+            fwd_expert_count = fwd_expert_count.cpu().numpy()
+        outputs = []
+        base_idx = 0
+        for i in range(self.num_expert):
+            batch_size = fwd_expert_count[i]
+            inp_slice = inp[base_idx : base_idx + batch_size]
+            outputs.append(self.experts[i](inp_slice))
+            base_idx += batch_size
+
+        return th.cat(outputs, dim=0)
+
+
+# run validation on model and record mean cosine similarity of each expert input/outputoutput, then drop most similar experts
+class CosineSimilarityDropping(ExpertDropping):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.total_experts = 0
+        self.moes = {}
+        
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedMoEMLP):
+                module.register_buffer('expert_similarity', th.zeros(module.num_expert, device=self.device))
+                module.register_buffer('num_forwards', th.zeros(module.num_expert, device=self.device))
+                
+                self.total_experts += module.num_expert
+
+                old_expert_fn = module.expert_fn
+                
+                bound_method = self.expert_fn.__get__(
+                    module, module.__class__
+                )
+                setattr(module, "expert_fn", bound_method)
+
+                self.moes[name] = (module, old_expert_fn)
+
+    def drop(self, keep_rate: float | int, model: nn.Module):
+        num_dropped = int(self.total_experts * (1 - keep_rate))
+
+        self.model.eval()
+        for samples, targets in self.valLoader:
+            samples = samples.to(self.device, non_blocking=True)
+            # targets = targets.to(self.device, non_blocking=True)
+
+            with th.no_grad():
+                outputs = model(samples)
+
+        expert_similarity_modules = []
+        expert_similarities = th.zeros((0,), device=self.device)
+        for name, (moe, old_expert_fn) in self.moes.items():
+            expert_similarity_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
+            expert_similarities = th.cat((expert_similarities, moe.expert_similarity), dim=0)
+            setattr(moe, "expert_fn", old_expert_fn)
+        expert_similarities[expert_similarities == 0] = float('inf')
+        
+        # drop experts with most similarity between input and outputs
+        dropped_experts = th.argsort(expert_similarities, descending=True)[:num_dropped]
+        for dropped_expert in dropped_experts:
+            moe, expert = expert_similarity_modules[dropped_expert]
+            moe.gate.expert_mapping[expert] = -1
+        
+        print(f'dropped {num_dropped} experts out of {self.total_experts}')
+        print(f'dropped expert similarities: {expert_similarities[dropped_experts]}')
+    
+    @staticmethod
+    def expert_fn(self, inp, fwd_expert_count):
+        r"""
+        The default expert function which either calls the experts as a whole
+        or as separate experts.
+        """
+        if self.experts_fused:
+            experts_out = self.experts(inp, fwd_expert_count)
+            
+            base_idx = 0
+            for i in range(self.num_expert):
+                batch_size = fwd_expert_count[i]
+                old_num_forwards = self.num_forwards[i]
+                self.num_forwards[i] += batch_size
+                expert_in = inp[base_idx : base_idx + batch_size]
+                expert_out = experts_out[base_idx : base_idx + batch_size]
+
+                if batch_size > 0:
+                    self.expert_similarity[i] = self.expert_similarity[i] * (old_num_forwards / self.num_forwards[i]) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (batch_size / self.num_forwards[i])
 
                 base_idx += batch_size
             
