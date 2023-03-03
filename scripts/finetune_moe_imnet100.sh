@@ -4,7 +4,7 @@ read -p 'cuda: ' cuda
 read -p 'batch size: ' batchsize
 # read -p 'gate: ' gate
 # read -p 'num-experts: ' num_experts
-read -p 'epochs: ' epochs
+# read -p 'epochs: ' epochs
 read -p 'n: ' n
 
 num_comma=`echo ${cuda} | tr -cd , | wc -c`
@@ -12,7 +12,7 @@ num_cuda=$((${num_comma} + 1))
 
 port=$((9000 + RANDOM % 1000))
 model="moe_tiny_patch16_224"
-lr="1e-5"
+lr="4e-5"
 dataset="IMNET100"
 # n=0  # seed
 validation_size=0.1
@@ -20,11 +20,11 @@ datapath="../ImageNet100"
 # gate="naive"
 num_experts="32"
 # batchsize="256"
-# epochs="1"
+epochs="50"
 
 for gate in "gshard" "naive";
 do
-    for keeprate in "0.9" "0.8" "0.7" "0.6" "0.5" "0.4" "0.3" "0.2" "0.1";
+    for keeprate in "1.0" "0.9" "0.8" "0.7" "0.6" "0.5" "0.4" "0.3" "0.2" "0.1" "0.0";
     do
         # CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset \
         NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port finetune.py --model $model --data-set $dataset \

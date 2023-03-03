@@ -62,13 +62,11 @@ class ExpertDropping(BasePruning):
         self.optimizer.state.clear() # optim.state = defaultdict(dict)
 
         moe_params = []
-        for name, module in self.model.named_modules():
-            if isinstance(module, CustomizedMoEMLP):
-                moe_params.extend(module.parameters())
-                continue
+        for name, module in self.model.named_modules():  # add norms and cls token to optimizer
             name_hierarchy = name.split('.')
             if len(name_hierarchy) == 3 and name_hierarchy[0] == 'block' and 'norm' in name_hierarchy[-1]:
                 moe_params.extend(module.parameters())
+        moe_params.extend(self.model.cls_token)
 
         self.optimizer.add_param_group(
             {'params' : moe_params}
@@ -424,7 +422,7 @@ class MeanShiftDropping(ExpertDropping):
         return th.cat(outputs, dim=0)
 
 
-# run validation on model and record mean cosine similarity of each expert input/outputoutput, then drop most similar experts
+# run validation on model and record mean cosine similarity of each expert input/output, then drop most similar experts
 class CosineSimilarityDropping(ExpertDropping):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -495,6 +493,97 @@ class CosineSimilarityDropping(ExpertDropping):
 
                 if batch_size > 0:
                     self.expert_similarity[i] = self.expert_similarity[i] * (old_num_forwards / self.num_forwards[i]) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (batch_size / self.num_forwards[i])
+
+                base_idx += batch_size
+            
+            return experts_out
+        
+        if isinstance(fwd_expert_count, th.Tensor):
+            fwd_expert_count = fwd_expert_count.cpu().numpy()
+        outputs = []
+        base_idx = 0
+        for i in range(self.num_expert):
+            batch_size = fwd_expert_count[i]
+            inp_slice = inp[base_idx : base_idx + batch_size]
+            outputs.append(self.experts[i](inp_slice))
+            base_idx += batch_size
+
+        return th.cat(outputs, dim=0)
+
+
+
+# run validation on model and record mean class attn of each expert input, then drop experts which receive least attn input
+class ClassAttnDropping(ExpertDropping):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.total_experts = 0
+        self.moes = {}
+        
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedMoEMLP):
+                module.register_buffer('expert_class_attn', th.zeros(module.num_expert, device=self.device))
+                module.register_buffer('num_forwards', th.zeros(module.num_expert, device=self.device))
+                
+                self.total_experts += module.num_expert
+
+                old_expert_fn = module.expert_fn
+                
+                bound_method = self.expert_fn.__get__(
+                    module, module.__class__
+                )
+                setattr(module, "expert_fn", bound_method)
+
+                self.moes[name] = (module, old_expert_fn)
+
+    def drop(self, keep_rate: float | int, model: nn.Module):
+        num_dropped = int(self.total_experts * (1 - keep_rate))
+
+        self.model.eval()
+        for samples, targets in self.valLoader:
+            samples = samples.to(self.device, non_blocking=True)
+            # targets = targets.to(self.device, non_blocking=True)
+
+            with th.no_grad():
+                outputs = model(samples)
+
+        expert_class_attn_modules = []
+        expert_class_attns = th.zeros((0,), device=self.device)
+        for name, (moe, old_expert_fn) in self.moes.items():
+            expert_class_attn_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
+            expert_class_attns = th.cat((expert_class_attns, moe.expert_class_attn), dim=0)
+            setattr(moe, "expert_fn", old_expert_fn)
+        
+        # drop experts with most similarity between input and outputs
+        dropped_experts = th.argsort(expert_class_attns)[:num_dropped]
+        for dropped_expert in dropped_experts:
+            moe, expert = expert_class_attn_modules[dropped_expert]
+            moe.gate.expert_mapping[expert] = -1
+        
+        print(f'dropped {num_dropped} experts out of {self.total_experts}')
+        print(f'dropped expert similarities: {expert_class_attns[dropped_experts]}')
+    
+    @staticmethod
+    def expert_fn(self, inp, fwd_expert_count):
+        r"""
+        The default expert function which either calls the experts as a whole
+        or as separate experts.
+        """
+        if self.experts_fused:
+            experts_out = self.experts(inp, fwd_expert_count)
+            
+            base_idx = 0
+            for i in range(self.num_expert):
+                batch_size = fwd_expert_count[i]
+                old_num_forwards = self.num_forwards[i]
+                self.num_forwards[i] += batch_size
+                expert_in = inp[base_idx : base_idx + batch_size]
+                expert_out = experts_out[base_idx : base_idx + batch_size]
+
+                if batch_size > 0:
+                    # TODO: get class attn somehow
+                    pass
+                    # self.expert_class_attn[i] = self.expert_class_attn[i] * (old_num_forwards / self.num_forwards[i]) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (batch_size / self.num_forwards[i])
 
                 base_idx += batch_size
             
