@@ -775,11 +775,11 @@ def main(args):
     #     loss_scaler=loss_scaler,
     #     optimizer=optimizer,
     # )
-    expert_dropping = CosineSimilarityDropping(
+    # expert_dropping = CosineSimilarityDropping(
     # expert_dropping = MeanShiftDropping(
     # expert_dropping = NormDropping(
     # expert_dropping = VolumeDropping(
-    # expert_dropping = RandomDropping(
+    expert_dropping = RandomDropping(
         model=model_without_ddp,
         trainloader=data_loader_train,
         valloader=data_loader_val,

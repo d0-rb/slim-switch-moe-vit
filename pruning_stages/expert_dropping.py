@@ -53,6 +53,30 @@ class ExpertDropping(BasePruning):
     def drop(self, keep_rate: float | int, model: nn.Module):
         raise NotImplementedError('drop method must be implemented in subclass')
     
+    @staticmethod
+    def correct_expert_softmax(device, self, input, output):
+        top_k_idx = self.top_k_idx.reshape(*output.shape[:2], self.top_k_idx.shape[-1])
+        gate_score = self.gate_score.reshape(*output.shape[:2], self.gate_score.shape[-1])
+        skipped_experts = top_k_idx == -1
+        num_skipped_experts = skipped_experts.sum(dim=-1, keepdim=True)  # for each token, how many dropped experts it was sent to
+        # dont rescale outputs where all or no experts were skipped
+        outputs_to_rescale = ((num_skipped_experts < top_k_idx.shape[-1]) & (num_skipped_experts > 0))
+
+        # get the sum of unskipped expert softmaxes
+        unskipped_expert_sum = (gate_score * ~skipped_experts).sum(dim=-1, keepdim=True)
+        normalization_factor = th.ones_like(num_skipped_experts, device=device, dtype=output.dtype)
+        normalization_factor[outputs_to_rescale] = (1/unskipped_expert_sum[outputs_to_rescale]).to(dtype=output.dtype)
+
+        # rescale outputs for tokens where some experts were skipped
+        rescaled_output = (output * normalization_factor.detach())
+
+        return rescaled_output
+
+    @staticmethod
+    def store_gate_info(self, top_k_idx, gate_score, _):
+        self.top_k_idx = top_k_idx
+        self.gate_score = gate_score
+    
     def finetune(self, *args, **kwargs):
         if not self.do_finetune:
             return
@@ -62,11 +86,17 @@ class ExpertDropping(BasePruning):
         self.optimizer.state.clear() # optim.state = defaultdict(dict)
 
         moe_params = []
-        for name, module in self.model.named_modules():  # add norms and cls token to optimizer
+        # add norms and cls token to optimizer, add hook to correct dropped expert softmax
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedMoEMLP):
+                module.gate_hook = partial(self.store_gate_info, module)
+                module.register_forward_hook(partial(self.correct_expert_softmax, self.device))
+                continue
             name_hierarchy = name.split('.')
-            if len(name_hierarchy) == 3 and name_hierarchy[0] == 'block' and 'norm' in name_hierarchy[-1]:
+            if len(name_hierarchy) == 3 and name_hierarchy[0] == 'blocks' and 'norm' in name_hierarchy[-1]:
                 moe_params.extend(module.parameters())
-        moe_params.extend(self.model.cls_token)
+
+        moe_params.append(self.model.cls_token)
 
         self.optimizer.add_param_group(
             {'params' : moe_params}
