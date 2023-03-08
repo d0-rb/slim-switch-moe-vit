@@ -44,6 +44,14 @@ from utils import TensorboardXTracker
 
 # import models_v2
 
+droptypes = {
+    'random': RandomDropping,
+    'volume': VolumeDropping,
+    'norm': NormDropping,
+    'meanshift': MeanShiftDropping,
+    'cosinesim': CosineSimilarityDropping,
+}
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
@@ -514,6 +522,8 @@ def get_args_parser():
     parser.add_argument("--gate", type=str, default="naive")
     parser.add_argument("--load-balance-scale", type=float, default=1e-1)
 
+    parser.add_argument("--expert-drop-type", default=next(iter(droptypes.keys())), choices=droptypes.keys(), help="which expert drop type to use", type=str)
+
     ExpertMerging.get_parser(parser)
     ExpertDropping.get_parser(parser)
     DropTokens.get_parser(parser)
@@ -775,11 +785,13 @@ def main(args):
     #     loss_scaler=loss_scaler,
     #     optimizer=optimizer,
     # )
+
     # expert_dropping = CosineSimilarityDropping(
     # expert_dropping = MeanShiftDropping(
     # expert_dropping = NormDropping(
     # expert_dropping = VolumeDropping(
-    expert_dropping = RandomDropping(
+    # expert_dropping = RandomDropping(
+    expert_dropping = droptypes[args.expert_drop_type](
         model=model_without_ddp,
         trainloader=data_loader_train,
         valloader=data_loader_val,

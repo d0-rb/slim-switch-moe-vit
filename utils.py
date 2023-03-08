@@ -326,6 +326,12 @@ class TensorboardXTracker:
 
     @ddp_skip
     def log_scalar(self, var_name, value, step):
+        if isinstance(step, float):
+            if 0 <= step <= 1:
+                step = int(step * 1000)
+            else:
+                step = int(step)
+        
         self.writer.add_scalar(var_name, value, step)
 
     @ddp_skip
