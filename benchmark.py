@@ -24,6 +24,9 @@ from timm.utils import AverageMeter
 from timm.utils import setup_default_logging
 
 import models
+from models.vit_moe import CustomizedNaiveGate, CustomizedGshardGate, CustomizedMoEMLP
+from utils import TensorboardXTracker
+from pathlib import Path
 
 has_apex = False
 try:
@@ -91,7 +94,8 @@ parser.add_argument(
     "--model",
     "-m",
     metavar="NAME",
-    default="resnet50",
+    # default="resnet50",
+    default="moe_tiny_patch16_224",
     help="model architecture (default: resnet50)",
 )
 parser.add_argument(
@@ -251,6 +255,12 @@ parser.add_argument(
 parser.add_argument("--num-rep", default=14, type=int)
 parser.add_argument("--num_experts", default=32, type=int)
 parser.add_argument("--gate", default="naive", type=str)
+parser.add_argument("--resume", default="", help="resume from checkpoint", type=str)
+parser.add_argument("--output_dir", default="", help="path where to save, empty for no saving", type=str)
+parser.add_argument("--keeprates", default='', help="keep rates", type=str)
+parser.add_argument("--seed", default=0, help="seed", type=int)
+
+from pruning_stages import ExpertDropping
 
 
 def timestamp(sync=False):
@@ -293,6 +303,7 @@ class BenchmarkRunner:
         precision="float32",
         num_warm_iter=10,
         num_bench_iter=50,
+        resume="",
         **kwargs,
     ):
         self.model_name = model_name
@@ -305,12 +316,28 @@ class BenchmarkRunner:
         self.model = eval(f"models.{model_name}")  # resvit_tiny_patch16_224_expert8_gcn
         self.model_name = self.model.__name__
         self.model = self.model(**kwargs)
+        
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedMoEMLP):
+                module.gate_hook = partial(ExpertDropping.store_gate_info, module)
+                module.register_forward_hook(partial(ExpertDropping.correct_expert_softmax, self.device))
+                continue
 
         self.model.to(
             device=self.device,
             dtype=self.model_dtype,
             memory_format=torch.channels_last if self.channels_last else None,
         )
+
+        if resume:
+            if resume.startswith("https"):
+                checkpoint = torch.hub.load_state_dict_from_url(
+                    resume, map_location="cpu", check_hash=True
+                )
+            else:
+                checkpoint = torch.load(resume, map_location="cpu")
+            self.model.load_state_dict(checkpoint["model"], strict=False)
+        
         self.num_classes = self.model.num_classes
         self.param_count = count_params(self.model)
         _logger.info(
@@ -345,10 +372,12 @@ class BenchmarkRunner:
 
 
 class InferenceBenchmarkRunner(BenchmarkRunner):
-    def __init__(self, model_name, device="cuda", torchscript=False, **kwargs):
+    def __init__(self, model_name, device="cuda", torchscript=False, writer=None, keeprate=1.0, **kwargs):
         super().__init__(
             model_name=model_name, device=device, torchscript=torchscript, **kwargs
         )
+        self.keeprate = keeprate
+        self.writer = writer
         self.model.eval()
 
     def run(self):
@@ -394,6 +423,10 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
             img_size=self.input_size[-1],
             param_count=round(self.param_count / 1e6, 2),
         )
+        
+        if self.writer:
+            self.writer.log_scalar("samples_per_sec", results['samples_per_sec'], self.keeprate)
+            self.writer.log_scalar(f"batch_{results['batch_size']}_time", results['step_time'], self.keeprate)
 
         _logger.info(
             f"Inference benchmark of {self.model_name} done. "
@@ -603,53 +636,73 @@ def main():
     model_cfgs = []
     model_names = []
 
-    if args.model_list:
-        args.model = ""
-        with open(args.model_list) as f:
-            model_names = [line.rstrip() for line in f]
-        model_cfgs = [(n, None) for n in model_names]
-    elif args.model == "all":
-        # validate all models in a list of names with pretrained checkpoints
-        args.pretrained = True
-        model_names = list_models(pretrained=True, exclude_filters=["*in21k"])
-        model_cfgs = [(n, None) for n in model_names]
-    elif not is_model(args.model):
-        # model name doesn't exist, try as wildcard filter
-        model_names = list_models(args.model)
-        model_cfgs = [(n, None) for n in model_names]
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
+    # output_dir = os.path.join(args.output_dir, timestr)
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+    if args.output_dir:
+        args.writer = TensorboardXTracker(output_dir)
+    output_dir = Path(args.output_dir)
 
-    if len(model_cfgs):
-        results_file = args.results_file or "./benchmark.csv"
-        _logger.info(
-            "Running bulk validation on these pretrained models: {}".format(
-                ", ".join(model_names)
+    keeprates = [float(keeprate) for keeprate in args.keeprates.split(',')]
+    resume_root = args.resume
+
+    for keeprate in keeprates:
+        if keeprate == 1.0 or keeprate == 0.0:
+            args.resume = os.path.join(os.path.dirname(resume_root), f'cosinesim/keeprate_{keeprate}/{args.seed}/checkpoint.pth')
+        else:
+            args.resume = os.path.join(resume_root, f'keeprate_{keeprate}/{args.seed}/checkpoint.pth')
+        args.keeprate = keeprate
+        if args.model_list:
+            args.model = ""
+            with open(args.model_list) as f:
+                model_names = [line.rstrip() for line in f]
+            model_cfgs = [(n, None) for n in model_names]
+        elif args.model == "all":
+            # validate all models in a list of names with pretrained checkpoints
+            args.pretrained = True
+            model_names = list_models(pretrained=True, exclude_filters=["*in21k"])
+            model_cfgs = [(n, None) for n in model_names]
+        elif not is_model(args.model):
+            # model name doesn't exist, try as wildcard filter
+            model_names = list_models(args.model)
+            model_cfgs = [(n, None) for n in model_names]
+
+        if len(model_cfgs):
+            results_file = args.results_file or "./benchmark.csv"
+            _logger.info(
+                "Running bulk validation on these pretrained models: {}".format(
+                    ", ".join(model_names)
+                )
             )
-        )
-        results = []
-        try:
-            for m, _ in model_cfgs:
-                if not m:
-                    continue
-                args.model = m
-                r = benchmark(args)
-                results.append(r)
-        except KeyboardInterrupt as e:
-            pass
-        sort_key = (
-            "train_samples_per_sec"
-            if "train" in args.bench
-            else "infer_samples_per_sec"
-        )
-        results = sorted(results, key=lambda x: x[sort_key], reverse=True)
-        if len(results):
-            write_results(results_file, results)
+            results = []
+            try:
+                for m, _ in model_cfgs:
+                    if not m:
+                        continue
+                    args.model = m
+                    r = benchmark(args)
+                    results.append(r)
+            except KeyboardInterrupt as e:
+                pass
+            sort_key = (
+                "train_samples_per_sec"
+                if "train" in args.bench
+                else "infer_samples_per_sec"
+            )
+            results = sorted(results, key=lambda x: x[sort_key], reverse=True)
+            if len(results):
+                write_results(results_file, results)
 
-        import json
+            import json
 
-        json_str = json.dumps(results, indent=4)
-        print(json_str)
-    else:
-        benchmark(args)
+            json_str = json.dumps(results, indent=4)
+            print(json_str)
+        else:
+            benchmark(args)
 
 
 def write_results(results_file, results):
