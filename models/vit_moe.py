@@ -48,6 +48,8 @@ class CustomizedNaiveGate(NaiveGate):
         self.register_buffer("expert_mapping", th.arange(self.tot_expert))
         self.register_forward_hook(self.apply_expert_mapping)
 
+        self.gate_scores = None
+
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
         value position"""
@@ -57,11 +59,7 @@ class CustomizedNaiveGate(NaiveGate):
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
-        # [0,1,2,3,4,5,6]
-        # [1,1,1,0,5,0,0]
-        # output[0] = Tokes x topk
-        # [[3,2], [5, 6]] -> [[0,1], [0,0]]
-        # -1 -> skipped processing
+        self.gate_score = output[1].detach().clone()
         return self.expert_mapping[output[0]], *output[1::]
 
 
@@ -74,6 +72,8 @@ class CustomizedGshardGate(GShardGate):
         self.register_buffer("expert_mapping", th.arange(self.tot_expert))
         self.register_forward_hook(self.apply_expert_mapping)
 
+        self.gate_scores = None
+
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
         value position"""
@@ -83,6 +83,7 @@ class CustomizedGshardGate(GShardGate):
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
+        self.gate_score = output[1]
         return self.expert_mapping[output[0]], *output[1::]
 
 
@@ -93,6 +94,7 @@ from .model import deit_base_patch16_224
 
 def _make_moe(model, settings, pretrained=False):
     cnt = 0
+    hidden_dim = (settings["embed_dim"] * settings["mlp_ratio"]) // 2
     for name, module in model.named_modules():
         if isinstance(module, Block):
             if cnt % 2 == 0:
@@ -101,26 +103,12 @@ def _make_moe(model, settings, pretrained=False):
 
                 module.mlp = CustomizedMoEMLP(
                     settings["embed_dim"],
-                    settings["embed_dim"] * settings["mlp_ratio"],
+                    hidden_dim,
                     moe_num_experts=settings["num_experts"],
                     moe_top_k=2,
                     drop=settings["drop_rate"],
                     gate=settings["gate"],
                 )
-                if pretrained:
-                    with th.no_grad():
-                        module.mlp.experts.htoh4.weight.data.copy_(
-                            fc1.weight.tile(settings["num_experts"], 1, 1)
-                        )
-                        module.mlp.experts.htoh4.bias.data.copy_(
-                            fc1.bias.tile(settings["num_experts"], 1)
-                        )
-                        module.mlp.experts.h4toh.weight.data.copy_(
-                            fc2.weight.tile(settings["num_experts"], 1, 1)
-                        )
-                        module.mlp.experts.h4toh.bias.data.copy_(
-                            fc2.bias.tile(settings["num_experts"], 1)
-                        )
             cnt += 1
     return model
 
