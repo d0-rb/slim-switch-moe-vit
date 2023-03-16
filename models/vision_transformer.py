@@ -274,6 +274,9 @@ class Attention(nn.Module):
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
+        self.attn = attn.sum(dim=1)  # [:, 0, 1::]
+        self.cls_attn = self.attn[:, 0, 1::]
+
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)

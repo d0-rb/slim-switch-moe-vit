@@ -295,17 +295,22 @@ class BenchmarkRunner:
         num_bench_iter=50,
         **kwargs,
     ):
+
         self.model_name = model_name
         self.detail = detail
         self.device = device
         self.use_amp, self.model_dtype, self.data_dtype = resolve_precision(precision)
         self.channels_last = kwargs.pop("channels_last", False)
         self.amp_autocast = torch.cuda.amp.autocast if self.use_amp else suppress
+        # self.model = kwargs.get("model", eval(f"models.{model_name}"))
+        if "model_object" not in kwargs:
+            self.model = eval(f"models.{model_name}")
+            self.model = self.model(**kwargs)
+            self.model_name = self.model.__name__
+        else:
+            self.model = kwargs["model_object"]
 
-        self.model = eval(f"models.{model_name}")  # resvit_tiny_patch16_224_expert8_gcn
-        self.model_name = self.model.__name__
-        self.model = self.model(**kwargs)
-
+        # )  # resvit_tiny_patch16_224_expert8_gcn
         self.model.to(
             device=self.device,
             dtype=self.model_dtype,

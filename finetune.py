@@ -339,7 +339,9 @@ def get_args_parser():
 
     # * Finetuning params
     parser.add_argument(
-        "--finetune", default="", help="finetune from checkpoint", required=True
+        "--finetune",
+        default="",
+        help="finetune from checkpoint",
     )
     parser.add_argument("--attn-only", action="store_true")
 
@@ -511,6 +513,8 @@ def get_args_parser():
         "--experts-merge", type=int, default=32, help="number of experts for MoE layer"
     )
     parser.add_argument("--validation-size", type=float, default=0.1)
+    parser.add_argument("--gate", type=str, default="naive")
+    parser.add_argument("--load-balance-scale", type=float, default=1e-1)
 
     ExpertMerging.get_parser(parser)
     ExpertDropping.get_parser(parser)
@@ -531,6 +535,8 @@ def main(args):
 
     timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
     output_dir = os.path.join(args.output_dir, timestr)
+    args.output_dir = output_dir
+
     os.makedirs(output_dir, exist_ok=True)
     if args.output_dir:
         writer = TensorboardXTracker(output_dir)
@@ -560,10 +566,17 @@ def main(args):
             sampler_train = RASampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+            sampler_val = RASampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
         else:
             sampler_train = torch.utils.data.DistributedSampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+            sampler_val = torch.utils.data.DistributedSampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
+
         if args.dist_eval:
             if len(dataset_test) % num_tasks != 0:
                 print(
@@ -574,15 +587,12 @@ def main(args):
             sampler_test = torch.utils.data.DistributedSampler(
                 dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False
             )
-            sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
-            )
         else:
             sampler_test = torch.utils.data.SequentialSampler(dataset_test)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_val = torch.utils.data.RandomSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
@@ -594,7 +604,7 @@ def main(args):
     )
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val,
-        sampler=sampler_train,
+        sampler=sampler_val,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -687,6 +697,13 @@ def main(args):
     # wrap the criterion in our custom DistillationLoss, which
     # just dispatches to the original criterion if args.distillation_type is 'none'
 
+    criterion = DistillationLoss(
+        criterion,
+        teacher_model,
+        args.distillation_type,
+        args.distillation_alpha,
+        args.distillation_tau,
+    )
     if args.resume:
         if args.resume.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -729,6 +746,8 @@ def main(args):
         writer=writer,
         loss_scaler=loss_scaler,
         optimizer=optimizer,
+        device=device,
+        mixup_fn=mixup_fn,
     )
 
     print(f"Start training for {args.epochs} epochs")
@@ -737,8 +756,6 @@ def main(args):
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
     #################################
-    __import__("pdb").set_trace()
-    print(args.foo_1)
 
     expert_merging.main()
     expert_dropping.main()
