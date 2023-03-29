@@ -26,9 +26,13 @@ from timm.utils import ModelEma  # type: ignore[import]
 from timm.utils import NativeScaler  # type: ignore[import]
 from torch.optim.optimizer import Optimizer
 from torch.utils.tensorboard import SummaryWriter
-
+from sklearn.cluster import KMeans
+# from kmeans import KernelKMeans
+# import sklearn.cluster import k_means_
+from copy import deepcopy
 import models
 import utils
+from models.vit_moe import _get_weights, _set_weights
 from augment import new_data_aug_generator
 from datasets import build_dataset
 from datasets import train_val_split
@@ -39,7 +43,8 @@ from samplers import RASampler
 from scheduler import CurriculumScheduler
 from utils import Optional
 from utils import TensorboardXTracker
-
+# from scipy.linalg import svd
+import scipy
 # import models_v2
 
 
@@ -498,6 +503,29 @@ def get_args_parser():
     parser.add_argument("--load-balance-scale", type=float, default=1e-1)
     parser.add_argument("--validation-size", type=float, default=0.1)
 
+    parser.add_argument(
+        "--cluster",
+        type=str,
+        default="svd",
+    )
+
+    parser.add_argument(
+        "--cluster-metric",
+        type=str,
+        default="mse",
+    )
+
+    parser.add_argument(
+        "--cluster-feature",
+        type=str,
+        default="weight",
+    )
+
+    parser.add_argument(
+        "--concate",
+        action="store_true"
+    )
+
     return parser
 
 
@@ -533,7 +561,7 @@ def main(args):
     )
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    if True:  # args.distributed:
+    if args.distributed:  # args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         if args.repeated_aug:
@@ -574,7 +602,7 @@ def main(args):
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val,
         sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
+        batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
@@ -673,7 +701,6 @@ def main(args):
             print("no patch embed")
 
     model.to(device)
-
     model_ema = None
     if args.model_ema:
         # meanportant to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -685,77 +712,77 @@ def main(args):
         )
 
     model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
+    # if args.distributed:
+    #     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+    #     model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of params:", n_parameters)
-    if not args.unscale_lr:
-        linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
-        args.lr = linear_scaled_lr
-
-    def param_group_fn(model: torch.nn.Module):
-        base_params = []
-        gate_params = []
-        for name, param in model.named_parameters():
-            if "moe_gate" in name or "dense_gate" in name:
-                gate_params.append(param)
-            else:
-                base_params.append(param)
-        ret = [
-            {"params": base_params},
-            {"params": gate_params, "lr": args.lr},
-        ]
-        return ret
-
-    optimizer = create_optimizer(
-        model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
-    )
-
-    loss_scaler = NativeScaler()
-
-    lr_scheduler, _ = create_scheduler(args, optimizer)
-
-    if mixup_active:
-        # smoothing is handled with mixup label transform
-        criterion = SoftTargetCrossEntropy()
-    elif args.smoothing:
-        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
-
-    if args.bce_loss:
-        criterion = torch.nn.BCEWithLogitsLoss()
-
-    teacher_model = None
-    if args.distillation_type != "none":
-        assert args.teacher_path, "need to specify teacher-path when using distillation"
-        print(f"Creating teacher model: {args.teacher_model}")
-        teacher_model = create_model(
-            args.teacher_model,
-            pretrained=False,
-            num_classes=args.nb_classes,
-            global_pool="avg",
-        )
-        if args.teacher_path.startswith("https"):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.teacher_path, map_location="cpu", check_hash=True
-            )
-        else:
-            checkpoint = torch.load(args.teacher_path, map_location="cpu")
-        teacher_model.load_state_dict(checkpoint["model"])
-        teacher_model.to(device)
-        teacher_model.eval()
-
-    # wrap the criterion in our custom DistillationLoss, which
-    # just dispatches to the original criterion if args.distillation_type is 'none'
-    criterion = DistillationLoss(
-        criterion,
-        teacher_model,
-        args.distillation_type,
-        args.distillation_alpha,
-        args.distillation_tau,
-    )
+    # if not args.unscale_lr:
+    #     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
+    #     args.lr = linear_scaled_lr
+    #
+    # def param_group_fn(model: torch.nn.Module):
+    #     base_params = []
+    #     gate_params = []
+    #     for name, param in model.named_parameters():
+    #         if "moe_gate" in name or "dense_gate" in name:
+    #             gate_params.append(param)
+    #         else:
+    #             base_params.append(param)
+    #     ret = [
+    #         {"params": base_params},
+    #         {"params": gate_params, "lr": args.lr},
+    #     ]
+    #     return ret
+    #
+    # optimizer = create_optimizer(
+    #     model_without_ddp, **optimizer_kwargs(args), param_group_fn=param_group_fn
+    # )
+    #
+    # loss_scaler = NativeScaler()
+    #
+    # lr_scheduler, _ = create_scheduler(args, optimizer)
+    #
+    # if mixup_active:
+    #     # smoothing is handled with mixup label transform
+    #     criterion = SoftTargetCrossEntropy()
+    # elif args.smoothing:
+    #     criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+    # else:
+    #     criterion = torch.nn.CrossEntropyLoss()
+    #
+    # if args.bce_loss:
+    #     criterion = torch.nn.BCEWithLogitsLoss()
+    #
+    # teacher_model = None
+    # if args.distillation_type != "none":
+    #     assert args.teacher_path, "need to specify teacher-path when using distillation"
+    #     print(f"Creating teacher model: {args.teacher_model}")
+    #     teacher_model = create_model(
+    #         args.teacher_model,
+    #         pretrained=False,
+    #         num_classes=args.nb_classes,
+    #         global_pool="avg",
+    #     )
+    #     if args.teacher_path.startswith("https"):
+    #         checkpoint = torch.hub.load_state_dict_from_url(
+    #             args.teacher_path, map_location="cpu", check_hash=True
+    #         )
+    #     else:
+    #         checkpoint = torch.load(args.teacher_path, map_location="cpu")
+    #     teacher_model.load_state_dict(checkpoint["model"])
+    #     teacher_model.to(device)
+    #     teacher_model.eval()
+    #
+    # # wrap the criterion in our custom DistillationLoss, which
+    # # just dispatches to the original criterion if args.distillation_type is 'none'
+    # criterion = DistillationLoss(
+    #     criterion,
+    #     teacher_model,
+    #     args.distillation_type,
+    #     args.distillation_alpha,
+    #     args.distillation_tau,
+    # )
 
     if args.resume:
         if args.resume.startswith("https"):
@@ -765,20 +792,21 @@ def main(args):
         else:
             checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"])
-        if (
-            not args.eval
-            and "optimizer" in checkpoint
-            and "lr_scheduler" in checkpoint
-            and "epoch" in checkpoint
-        ):
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            args.start_epoch = checkpoint["epoch"] + 1
-            if args.model_ema:
-                utils._load_checkpoint_for_ema(model_ema, checkpoint["model_ema"])
-            if "scaler" in checkpoint:
-                loss_scaler.load_state_dict(checkpoint["scaler"])
-            lr_scheduler.step(args.start_epoch)
+        print(f'ckpt {args.resume} loaded')
+        # if (
+        #     not args.eval
+        #     and "optimizer" in checkpoint
+        #     and "lr_scheduler" in checkpoint
+        #     and "epoch" in checkpoint
+        # ):
+        #     optimizer.load_state_dict(checkpoint["optimizer"])
+        #     lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        #     args.start_epoch = checkpoint["epoch"] + 1
+        #     if args.model_ema:
+        #         utils._load_checkpoint_for_ema(model_ema, checkpoint["model_ema"])
+        #     if "scaler" in checkpoint:
+        #         loss_scaler.load_state_dict(checkpoint["scaler"])
+        #     lr_scheduler.step(args.start_epoch)
 
     # vis = utils.TokenSkipVisualizer(
     # model=model,
@@ -790,92 +818,135 @@ def main(args):
     # skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
     # version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
     # )
+    def kmeans(x, n_clusters=8, cluster_metric="mse"):
+        shape = x.shape
+        x = x.reshape(shape[0], -1)
+        x = x.detach().cpu().numpy()
+        if cluster_metric == "mse":
+            kmeans_estimator = KMeans(n_clusters=n_clusters, random_state=seed, n_init="auto").fit(x)
+            centroids = kmeans_estimator.cluster_centers_
+            labels = kmeans_estimator.labels_
+        elif cluster_metric == "cosine":
+            # kmeans_estimator = KernelKMeans(n_clusters=n_clusters, max_iter=300, random_state=seed, kernel="cosine", verbose=1)
+            # kmeans_estimator.fit(x)
+            # labels = kmeans_estimator.predict(x)
+            length = np.sqrt((x ** 2).sum(axis=1))[:, None]
+            x = x / length
+            kmeans_estimator = KMeans(n_clusters=n_clusters, random_state=seed, n_init="auto").fit(x)
+            len_ = np.sqrt(np.square(kmeans_estimator.cluster_centers_).sum(axis=1)[:, None])
+            # centroids = kmeans_estimator.cluster_centers_ / len_
+            # centroids = kmeans_estimator.cluster_centers_ * length
+            labels = kmeans_estimator.labels_
 
-    print(f"Start training for {args.epochs} epochs")
+        x_recon = np.zeros(x.shape, dtype=np.float32)
+        for i in range(x.shape[0]):
+            x_recon[i] = centroids[labels[i]]
+        x_recon = torch.from_numpy(x_recon.reshape(shape)).cuda()
+        return x_recon
+
+
+    def svd(x, n_clusters=8):
+        shape = x.shape
+        x = x.reshape(shape[0], -1)
+        U, s, V = torch.linalg.svd(x, full_matrices=False)
+        # x = x.detach().cpu().numpy()
+        #s
+        # U, s, V = np.linalg.svd(x, full_matrices=False)
+        # Set the rank of the approximation
+        k = n_clusters
+        # Generate the low-rank approximation of the matrix
+        # x_recon = U[:, :k].dot(np.diag(s[:k])).dot(V[:k, :])
+        x_recon = torch.matmul(torch.matmul(U[:, :k], torch.diag(s[:k])), V[:k, :])
+
+        # x_recon = torch.from_numpy(x_recon.reshape(shape)).cuda()
+        x_recon = x_recon.reshape(shape)
+        return x_recon
+
+
     start_time = time.time()
     max_accuracy = 0.0
-    threshold = {}
-    try:
-        for epoch in range(args.start_epoch, args.epochs):
-            torch.cuda.reset_peak_memory_stats()
-            if args.distributed:
-                data_loader_train.sampler.set_epoch(epoch)
+    # threshold = {}
 
-            train_stats = train_one_epoch(
-                model,
-                criterion,
-                data_loader_train,
-                optimizer,
-                device,
-                epoch,
-                loss_scaler,
-                args.clip_grad,
-                model_ema,
-                mixup_fn,
-                set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
-                args=args,
-            )
+    # n_clusters = 16
+    weights = _get_weights(model)
+    for n_clusters in range(args.num_experts, 0, -1):
+    # for n_clusters in range(4, 0, -1):
+        # print(f'n_clusters: {n_clusters}')
+        print(f'{n_clusters}, ', end=" ")
+        if args.eval:
+            # with torch.no_grad():
+            # with torch.enable_grad():
+            # weights = _get_weights(model)
+            weights_new = []
+            for i, weight in enumerate(weights):
+                htoh4, h4toh = deepcopy(weight)
+                if args.cluster_feature == 'weight':
+                    if args.concate:
+                        if args.cluster == 'kmeans':
+                            htoh4_shape = htoh4.shape
+                            h4toh_shape = h4toh.shape
+                            htoh4 = htoh4.reshape(htoh4_shape[0], -1)
+                            h4toh = h4toh.reshape(h4toh_shape[0], -1)
+                            result = kmeans(torch.cat((htoh4, h4toh), dim=-1), n_clusters=n_clusters, cluster_metric=args.cluster_metric)
+                            htoh4, h4toh = result[:, :htoh4.shape[1]], result[:, htoh4.shape[1]:]
+                            htoh4 = htoh4.reshape(htoh4_shape)
+                            h4toh = h4toh.reshape(h4toh_shape)
+                        elif args.cluster == 'svd':
+                            htoh4_shape = htoh4.shape
+                            h4toh_shape = h4toh.shape
+                            htoh4 = htoh4.reshape(htoh4_shape[0], -1)
+                            h4toh = h4toh.reshape(h4toh_shape[0], -1)
+                            result = svd(torch.cat((htoh4, h4toh), dim=-1), n_clusters=n_clusters)
+                            htoh4, h4toh = result[:, :htoh4.shape[1]], result[:, htoh4.shape[1]:]
+                            htoh4 = htoh4.reshape(htoh4_shape)
+                            h4toh = h4toh.reshape(h4toh_shape)
+                    else:
+                        if args.cluster == 'kmeans':
+                            htoh4 = kmeans(htoh4, n_clusters=n_clusters)
+                            h4toh = kmeans(h4toh, n_clusters=n_clusters)
+                        elif args.cluster == 'svd':
+                            htoh4 = svd(htoh4, n_clusters=n_clusters)
+                            h4toh = svd(h4toh, n_clusters=n_clusters)
+                elif args.cluster_feature == 'feature':
 
-            lr_scheduler.step(epoch)
-            writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
-            writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
+                # htoh4 = htoh4 + torch.rand(htoh4.shape, dtype=htoh4.dtype, device='cuda') * 1e-04
+                # h4toh = h4toh + torch.rand(h4toh.shape, dtype=h4toh.dtype, device='cuda') * 1e-04
+                weights_new.append((htoh4, h4toh))
+                # weights[i] = htoh4, h4toh
 
-            if args.output_dir:
-                checkpoint_paths = [output_dir / "checkpoint.pth"]
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master(
-                        {
-                            "model": model_without_ddp.state_dict(),
-                            "optimizer": optimizer.state_dict(),
-                            "lr_scheduler": lr_scheduler.state_dict(),
-                            "epoch": epoch,
-                            "model_ema": get_state_dict(model_ema),
-                            "scaler": loss_scaler.state_dict(),
-                            "args": args,
-                        },
-                        checkpoint_path,
-                    )
+            model = _set_weights(model, weights_new)
+            # model = _set_weights(model, weights_new)
+
+            epoch = checkpoint["epoch"]
+            # if args.output_dir:
+            #     checkpoint_paths = [output_dir / "checkpoint.pth"]
+            #     for checkpoint_path in checkpoint_paths:
+            #         utils.save_on_master(
+            #             {
+            #                 "model": model_without_ddp.state_dict(),
+            #                 "optimizer": optimizer.state_dict(),
+            #                 "lr_scheduler": lr_scheduler.state_dict(),
+            #                 "epoch": epoch,
+            #                 "model_ema": get_state_dict(model_ema),
+            #                 "scaler": loss_scaler.state_dict(),
+            #                 "args": args,
+            #             },
+            #             checkpoint_path,
+            #         )
 
             test_stats = evaluate(data_loader_val, model, device)
 
             writer.log_scalar(
-                "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+                "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0 ** 2, epoch
             )
 
-            print(
-                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-            )
+            # print(
+            #     f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.2f}%"
+            # )
 
-            writer.log_scalar("train/loss", train_stats["loss"], epoch)
             writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
 
-            if "loss_attn" in train_stats:
-                writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
-
-            if max_accuracy < test_stats["acc1"]:
-                # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-                max_accuracy = test_stats["acc1"]
-                if args.output_dir:
-                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
-                    for checkpoint_path in checkpoint_paths:
-                        utils.save_on_master(
-                            {
-                                "model": model_without_ddp.state_dict(),
-                                "optimizer": optimizer.state_dict(),
-                                "lr_scheduler": lr_scheduler.state_dict(),
-                                "epoch": epoch,
-                                "model_ema": get_state_dict(model_ema),
-                                "scaler": loss_scaler.state_dict(),
-                                "args": args,
-                            },
-                            checkpoint_path,
-                        )
-
-            print(f"Max accuracy: {max_accuracy:.2f}%")
-            writer.log_scalar("test/acc1/max", max_accuracy, epoch)
-
             log_stats = {
-                **{f"train_{k}": v for k, v in train_stats.items()},
                 **{f"test_{k}": v for k, v in test_stats.items()},
                 "epoch": epoch,
                 "n_parameters": n_parameters,
@@ -884,16 +955,107 @@ def main(args):
             if args.output_dir and utils.is_main_process():
                 with (output_dir / "log.txt").open("a") as f:
                     f.write(json.dumps(log_stats) + "\n")
-    except KeyboardInterrupt:
-        print("stopping experiment prematurely...")
-        print("performing evaluation at different thresholds")
+        else:
+            print(f"Start training for {args.epochs} epochs")
+            try:
+                for epoch in range(args.start_epoch, args.epochs):
+                    torch.cuda.reset_peak_memory_stats()
+                    if args.distributed:
+                        data_loader_train.sampler.set_epoch(epoch)
 
-    eval_threshold_list = np.linspace(
-        start=1.0,
-        stop=args.target_threshold_dense,
-        num=int((1.0 - args.starting_threshold_dense) / args.eval_threshold_step + 1),
-        endpoint=True,
-    )
+                    train_stats = train_one_epoch(
+                        model,
+                        criterion,
+                        data_loader_train,
+                        optimizer,
+                        device,
+                        epoch,
+                        loss_scaler,
+                        args.clip_grad,
+                        model_ema,
+                        mixup_fn,
+                        set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
+                        args=args,
+                    )
+
+                    lr_scheduler.step(epoch)
+                    writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+                    writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
+
+                    if args.output_dir:
+                        checkpoint_paths = [output_dir / "checkpoint.pth"]
+                        for checkpoint_path in checkpoint_paths:
+                            utils.save_on_master(
+                                {
+                                    "model": model_without_ddp.state_dict(),
+                                    "optimizer": optimizer.state_dict(),
+                                    "lr_scheduler": lr_scheduler.state_dict(),
+                                    "epoch": epoch,
+                                    "model_ema": get_state_dict(model_ema),
+                                    "scaler": loss_scaler.state_dict(),
+                                    "args": args,
+                                },
+                                checkpoint_path,
+                            )
+
+                    test_stats = evaluate(data_loader_val, model, device)
+
+                    writer.log_scalar(
+                        "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+                    )
+
+                    print(
+                        f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+                    )
+
+                    writer.log_scalar("train/loss", train_stats["loss"], epoch)
+                    writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+
+                    if "loss_attn" in train_stats:
+                        writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
+
+                    if max_accuracy < test_stats["acc1"]:
+                        # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
+                        max_accuracy = test_stats["acc1"]
+                        if args.output_dir:
+                            checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                            for checkpoint_path in checkpoint_paths:
+                                utils.save_on_master(
+                                    {
+                                        "model": model_without_ddp.state_dict(),
+                                        "optimizer": optimizer.state_dict(),
+                                        "lr_scheduler": lr_scheduler.state_dict(),
+                                        "epoch": epoch,
+                                        "model_ema": get_state_dict(model_ema),
+                                        "scaler": loss_scaler.state_dict(),
+                                        "args": args,
+                                    },
+                                    checkpoint_path,
+                                )
+
+                    print(f"Max accuracy: {max_accuracy:.2f}%")
+                    writer.log_scalar("test/acc1/max", max_accuracy, epoch)
+
+                    log_stats = {
+                        **{f"train_{k}": v for k, v in train_stats.items()},
+                        **{f"test_{k}": v for k, v in test_stats.items()},
+                        "epoch": epoch,
+                        "n_parameters": n_parameters,
+                    }
+
+                    if args.output_dir and utils.is_main_process():
+                        with (output_dir / "log.txt").open("a") as f:
+                            f.write(json.dumps(log_stats) + "\n")
+            except KeyboardInterrupt:
+                print("stopping experiment prematurely...")
+                print("performing evaluation at different thresholds")
+
+    # eval_threshold_list = np.linspace(
+    #     start=1.0,
+    #     stop=args.target_threshold_dense,
+    #     num=int((1.0 - args.starting_threshold_dense) / args.eval_threshold_step + 1),
+    #     endpoint=True,
+    # )
 
     # for current_thresh in eval_threshold_list:
 
@@ -915,9 +1077,9 @@ def main(args):
 
     if args.distributed:
         torch.distributed.barrier()
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print("Training time {}".format(total_time_str))
+    # total_time = time.time() - start_time
+    # total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    # print("Elapsed time {}".format(total_time_str))
     writer.close()
 
 

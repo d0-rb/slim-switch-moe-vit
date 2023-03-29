@@ -1,10 +1,17 @@
 #!/bin/bash
-read -p 'cuda: ' cuda
-read -p 'data path: ' datapath
-read -p 'batch size: ' batchsize
-read -p 'gate: ' gate
-read -p 'num-experts: ' num_experts
-read -p 'epochs: ' epochs
+#read -p 'cuda: ' cuda
+#read -p 'data path: ' datapath
+#read -p 'batch size: ' batchsize
+#read -p 'gate: ' gate
+#read -p 'num-experts: ' num_experts
+#read -p 'epochs: ' epochs
+
+cuda='4,5,6,7'
+datapath='/home/grads/s/sandboxmaster/DATASET/ImageNet100'
+batchsize=256
+gate=gshard
+num_experts=8
+epochs=600
 
 num_comma=`echo ${cuda} | tr -cd , | wc -c`
 num_cuda=$((${num_comma} + 1))
