@@ -8,18 +8,21 @@ import time
 import datetime
 from timm.utils import get_state_dict  # type: ignore[import]
 from pathlib import Path
+import random
 
 import utils
 from engine import evaluate, train_one_epoch
 
 from .base import BasePruning
-from models.vit_moe import CustomizedNaiveGate, CustomizedGshardGate, CustomizedMoEMLP
+from models.vit_moe import CustomizedNaiveGate, CustomizedGshardGate, CustomizedMoEMLP, Block
 
 
 class ExpertDropping(BasePruning):
     @staticmethod
     def get_parser(parser: argparse.ArgumentParser):
         parser.add_argument("--expert-keep-rate", default=1., type=float, help='what percentage of experts to keep')
+        parser.add_argument("--expert-drop-type", default='random', choices=['random', 'volume', 'norm', 'meanshift', 'cosinesim'], help="which expert drop type to use", type=str)
+        parser.add_argument("--expert-drop-local", default='false', choices=['false', 'true'], help="whether to drop locally or not", type=str)
 
     def __init__(self, model: nn.Module, testloader, valloader, optimizer, criterion, loss_scaler, lr_scheduler, writer, args, model_ema, mixup_fn, **kwargs):
         super().__init__(**kwargs)
@@ -42,13 +45,19 @@ class ExpertDropping(BasePruning):
         self.model_ema = model_ema
         self.mixup_fn = mixup_fn
         self.n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self.drop_local = (args.expert_drop_local == 'true')
         self.do_finetune = args.epochs > 0
 
     def prune(self, *args, **kwargs):
         if not 0 <= self.keep_rate <= 1:
             raise ValueError('expert_keep_rate must be in range [0, 1]')
         
-        return self.drop(keep_rate=self.keep_rate, model=self.model)
+        dropped = self.drop(keep_rate=self.keep_rate, model=self.model)
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedNaiveGate) or isinstance(module, CustomizedGshardGate):
+                print(f"Gate {name} dropped experts: {(module.expert_mapping == -1).sum().item()}")
+
+        return dropped
 
     def drop(self, keep_rate: float | int, model: nn.Module):
         raise NotImplementedError('drop method must be implemented in subclass')
@@ -199,21 +208,42 @@ class ExpertDropping(BasePruning):
 # randomly drop experts equally among all gates
 class RandomDropping(ExpertDropping):
     def drop(self, keep_rate: float | int, model: nn.Module) -> None:
-        num_dropped = 0
         total_experts = 0
-        for name, module in model.named_modules():
-            if isinstance(module, CustomizedNaiveGate) or isinstance(module, CustomizedGshardGate):
-                num_drop: int = int(module.tot_expert * (1 - keep_rate))  # number of experts to drop
-                num_dropped += num_drop
-                total_experts += module.tot_expert
+        gates = [module for module in model.modules() if isinstance(module, CustomizedNaiveGate) or isinstance(module, CustomizedGshardGate)]
+        total_experts = sum(gate.tot_expert for gate in gates)
+        num_dropped = int(total_experts * (1 - keep_rate))
+        
+        if self.drop_local:
+            num_drop_experts_per_gate = th.linspace(0, num_dropped, len(gates) + 1).int()[1:]
+            num_drop_experts_per_gate[1:] -= num_drop_experts_per_gate[:-1].clone()
+
+            for i, gate in enumerate(gates):
+                num_drop: int = num_drop_experts_per_gate[i].item()  # number of experts to drop
                 if num_drop == 0:
                     continue
 
-                dropped_experts: th.Tensor = th.multinomial(th.ones(module.tot_expert), num_drop, replacement=False)  # indices of experts to drop
+                valid_expert_mask = gate.expert_mapping != -1  # ensure we only drop experts that have not already been dropped
 
-                new_mapping: th.Tensor = module.expert_mapping.clone()
+                dropped_experts: th.Tensor = th.multinomial(valid_expert_mask, num_drop, replacement=False)  # indices of experts to drop
+
+                new_mapping: th.Tensor = gate.expert_mapping.clone()
                 new_mapping[dropped_experts] = -1  # drop experts[]
-                module.set_expert_mapping(mapping=new_mapping)
+                gate.set_expert_mapping(mapping=new_mapping)
+        else:
+            all_experts = []
+            for gate in gates:
+                # only add experts that have not already been dropped to the list of eligible experts to drop
+                all_experts.extend([(gate, expert_idx) for expert_idx in range(gate.tot_expert) if gate.expert_mapping[expert_idx] != -1])
+            
+            random.shuffle(all_experts)
+            new_gate_mappings = {gate: gate.expert_mapping.clone() for gate in gates}
+            
+            for gate, expert in all_experts[:num_dropped]:
+                new_gate_mappings[gate][expert] = -1
+            
+            for gate, new_mapping in new_gate_mappings.items():
+                gate.set_expert_mapping(mapping=new_mapping)
+
         
         print(f'dropped {num_dropped} experts out of {total_experts}')
 
@@ -246,20 +276,48 @@ class VolumeDropping(ExpertDropping):
                 outputs = model(samples)
 
         expert_volume_modules = []
-        expert_volumes = th.zeros((0,), device=self.device)
+        expert_volumes = th.zeros((0,self.total_experts//len(self.gates),), device=self.device)
         for name, (gate, hook) in self.gates.items():
             expert_volume_modules.extend([(gate, expert) for expert in range(gate.tot_expert)])
-            expert_volumes = th.cat((expert_volumes, gate.expert_volume), dim=0)
+            expert_volumes = th.cat((expert_volumes, gate.expert_volume.unsqueeze(dim=0)), dim=0)
             hook.remove()
         
-        # drop experts with least volume
-        dropped_experts = th.argsort(expert_volumes)[:num_dropped]
-        for dropped_expert in dropped_experts:
-            gate, expert = expert_volume_modules[dropped_expert]
-            gate.expert_mapping[expert] = -1
+        print(f'dropped expert volumes:')
+        
+        if self.drop_local:
+            num_drop_experts_per_gate = th.linspace(0, num_dropped, len(self.gates) + 1).int()[1:]
+            num_drop_experts_per_gate[1:] -= num_drop_experts_per_gate[:-1].clone()
+
+            sorted_experts = th.argsort(expert_volumes, dim=-1)
+
+            for i, (name, (gate, hook)) in enumerate(self.gates.items()):
+                num_drop: int = num_drop_experts_per_gate[i].item()  # number of experts to drop
+                if num_drop == 0:
+                    continue
+
+                dropped_experts: th.Tensor = sorted_experts[i][:num_drop]  # indices of experts to drop
+
+                new_mapping: th.Tensor = gate.expert_mapping.clone()
+                new_mapping[dropped_experts] = -1  # drop experts
+                gate.set_expert_mapping(mapping=new_mapping)
+
+                print(f'{expert_volumes[i, dropped_experts]}')
+        else:
+            expert_volumes = th.flatten(expert_volumes)
+            # drop experts with least volume
+            dropped_experts = th.argsort(expert_volumes)[:num_dropped]
+            dropped_across_layers = {i: 0 for i in range(len(self.gates))}
+            for _dropped_expert in dropped_experts:
+                dropped_expert = _dropped_expert.item()
+                gate, expert = expert_volume_modules[dropped_expert]
+                gate.expert_mapping[expert] = -1
+                layer = dropped_expert // gate.tot_expert
+                dropped_across_layers[layer] += 1
+            
+            print(f'{expert_volumes[dropped_experts]}')
+            print(f'experts dropped across layers: {dropped_across_layers}')
         
         print(f'dropped {num_dropped} experts out of {self.total_experts}')
-        print(f'dropped expert volumes: {expert_volumes[dropped_experts]}')
     
     @staticmethod
     def record_expert_volume(device, self, inputs, output) -> None:
@@ -307,20 +365,49 @@ class NormDropping(ExpertDropping):
                 outputs = model(samples)
 
         expert_norm_modules = []
-        expert_norms = th.zeros((0,), device=self.device)
+        expert_norms = th.zeros((0,self.total_experts//len(self.moes),), device=self.device)
         for name, (moe, old_expert_fn) in self.moes.items():
             expert_norm_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
-            expert_norms = th.cat((expert_norms, moe.expert_norm), dim=0)
+            expert_norms = th.cat((expert_norms, moe.expert_norm.unsqueeze(dim=0)), dim=0)
             setattr(moe, "expert_fn", old_expert_fn)
         
-        # drop experts with lowest norms
-        dropped_experts = th.argsort(expert_norms)[:num_dropped]
-        for dropped_expert in dropped_experts:
-            moe, expert = expert_norm_modules[dropped_expert]
-            moe.gate.expert_mapping[expert] = -1
+        print(f'dropped expert norms:')
+        
+        if self.drop_local:
+            num_drop_experts_per_moe = th.linspace(0, num_dropped, len(self.moes) + 1).int()[1:]
+            num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
+
+            sorted_experts = th.argsort(expert_norms, dim=-1)
+
+            for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
+                num_drop: int = num_drop_experts_per_moe[i].item()  # number of experts to drop
+                if num_drop == 0:
+                    continue
+
+                dropped_experts: th.Tensor = sorted_experts[i][:num_drop]  # indices of experts to drop
+
+                new_mapping: th.Tensor = moe.gate.expert_mapping.clone()
+                new_mapping[dropped_experts] = -1  # drop experts
+                moe.gate.set_expert_mapping(mapping=new_mapping)
+
+                print(f'{expert_norms[i, dropped_experts]}')
+        else:
+            expert_norms = th.flatten(expert_norms)
+            # drop experts with lowest norms
+            dropped_experts = th.argsort(expert_norms)[:num_dropped]
+            dropped_across_layers = {i: 0 for i in range(len(self.moes))}
+            for _dropped_expert in dropped_experts:
+                dropped_expert = _dropped_expert.item()
+                moe, expert = expert_norm_modules[dropped_expert]
+                moe.gate.expert_mapping[expert] = -1
+                layer = dropped_expert // moe.gate.tot_expert
+                dropped_across_layers[layer] += 1
+            
+            print(f'{expert_norms[dropped_experts]}')
+            print(f'experts dropped across layers: {dropped_across_layers}')
         
         print(f'dropped {num_dropped} experts out of {self.total_experts}')
-        print(f'dropped expert norms: {expert_norms[dropped_experts]}')
+    
     
     @staticmethod
     def expert_fn(self, inp, fwd_expert_count):
@@ -395,20 +482,50 @@ class MeanShiftDropping(ExpertDropping):
                 outputs = model(samples)
 
         expert_mean_modules = []
-        expert_mean_shifts = th.zeros((0,), device=self.device)
+        expert_mean_shifts = th.zeros((0,self.total_experts//len(self.moes),), device=self.device)
         for name, (moe, old_expert_fn) in self.moes.items():
             expert_mean_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
-            expert_mean_shifts = th.cat((expert_mean_shifts, (moe.expert_mean - moe.input_mean).norm(dim=-1, p=2)), dim=0)
+            expert_mean_shifts = th.cat((expert_mean_shifts, (moe.expert_mean - moe.input_mean).norm(dim=-1, p=2).unsqueeze(dim=0)), dim=0)
             setattr(moe, "expert_fn", old_expert_fn)
         
-        # drop experts with lowest mean shifts
-        dropped_experts = th.argsort(expert_mean_shifts)[:num_dropped]
-        for dropped_expert in dropped_experts:
-            moe, expert = expert_mean_modules[dropped_expert]
-            moe.gate.expert_mapping[expert] = -1
+        print(f'dropped expert mean shift norms:')
+        
+        if self.drop_local:
+            num_drop_experts_per_moe = th.linspace(0, num_dropped, len(self.moes) + 1).int()[1:]
+            num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
+
+            sorted_experts = th.argsort(expert_mean_shifts, dim=-1)
+
+            for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
+                num_drop: int = num_drop_experts_per_moe[i].item()  # number of experts to drop
+                if num_drop == 0:
+                    continue
+
+                dropped_experts: th.Tensor = sorted_experts[i][:num_drop]  # indices of experts to drop
+
+                new_mapping: th.Tensor = moe.gate.expert_mapping.clone()
+                new_mapping[dropped_experts] = -1  # drop experts
+                moe.gate.set_expert_mapping(mapping=new_mapping)
+
+                print(f'{expert_mean_shifts[i, dropped_experts]}')
+        else:
+            expert_mean_shifts = th.flatten(expert_mean_shifts)
+            # drop experts with lowest mean shifts
+            dropped_experts = th.argsort(expert_mean_shifts)[:num_dropped]
+            dropped_across_layers = {i: 0 for i in range(len(self.moes))}
+            for _dropped_expert in dropped_experts:
+                dropped_expert = _dropped_expert.item()
+                moe, expert = expert_mean_modules[dropped_expert]
+                moe.gate.expert_mapping[expert] = -1
+                layer = dropped_expert // moe.gate.tot_expert
+                dropped_across_layers[layer] += 1
+            
+            print(f'{expert_mean_shifts[dropped_experts]}')
+            print(f'experts dropped across layers: {dropped_across_layers}')
+            
         
         print(f'dropped {num_dropped} experts out of {self.total_experts}')
-        print(f'dropped expert mean shift norm: {expert_mean_shifts[dropped_experts]}')
+    
     
     @staticmethod
     def expert_fn(self, inp, fwd_expert_count):
@@ -488,21 +605,50 @@ class CosineSimilarityDropping(ExpertDropping):
                 outputs = model(samples)
 
         expert_similarity_modules = []
-        expert_similarities = th.zeros((0,), device=self.device)
+        expert_similarities = th.zeros((0,self.total_experts//len(self.moes),), device=self.device)
         for name, (moe, old_expert_fn) in self.moes.items():
             expert_similarity_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
-            expert_similarities = th.cat((expert_similarities, moe.expert_similarity), dim=0)
+            expert_similarities = th.cat((expert_similarities, moe.expert_similarity.unsqueeze(dim=0)), dim=0)
             setattr(moe, "expert_fn", old_expert_fn)
         expert_similarities[expert_similarities == 0] = float('inf')
         
-        # drop experts with most similarity between input and outputs
-        dropped_experts = th.argsort(expert_similarities, descending=True)[:num_dropped]
-        for dropped_expert in dropped_experts:
-            moe, expert = expert_similarity_modules[dropped_expert]
-            moe.gate.expert_mapping[expert] = -1
+        print(f'dropped expert similarities:')
+        
+        if self.drop_local:
+            num_drop_experts_per_moe = th.linspace(0, num_dropped, len(self.moes) + 1).int()[1:]
+            num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
+
+            sorted_experts = th.argsort(expert_similarities, descending=True, dim=-1)
+
+            for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
+                num_drop: int = num_drop_experts_per_moe[i].item()  # number of experts to drop
+                if num_drop == 0:
+                    continue
+
+                dropped_experts: th.Tensor = sorted_experts[i][:num_drop]  # indices of experts to drop
+
+                new_mapping: th.Tensor = moe.gate.expert_mapping.clone()
+                new_mapping[dropped_experts] = -1  # drop experts
+                moe.gate.set_expert_mapping(mapping=new_mapping)
+
+                print(f'{expert_similarities[i, dropped_experts]}')
+        else:
+            expert_similarities = th.flatten(expert_similarities)
+            # drop experts with highest cosine similarity
+            dropped_experts = th.argsort(expert_similarities, descending=True)[:num_dropped]
+            dropped_across_layers = {i: 0 for i in range(len(self.moes))}
+            for _dropped_expert in dropped_experts:
+                dropped_expert = _dropped_expert.item()
+                moe, expert = expert_similarity_modules[dropped_expert]
+                moe.gate.expert_mapping[expert] = -1
+                layer = dropped_expert // moe.gate.tot_expert
+                dropped_across_layers[layer] += 1
+            
+            print(f'{expert_similarities[dropped_experts]}')
+            print(f'experts dropped across layers: {dropped_across_layers}')
+            
         
         print(f'dropped {num_dropped} experts out of {self.total_experts}')
-        print(f'dropped expert similarities: {expert_similarities[dropped_experts]}')
     
     @staticmethod
     def expert_fn(self, inp, fwd_expert_count):
@@ -551,20 +697,22 @@ class ClassAttnDropping(ExpertDropping):
         self.moes = {}
         
         for name, module in self.model.named_modules():
-            if isinstance(module, CustomizedMoEMLP):
-                module.register_buffer('expert_class_attn', th.zeros(module.num_expert, device=self.device))
-                module.register_buffer('num_forwards', th.zeros(module.num_expert, device=self.device))
+            if isinstance(module, Block):
+                moe = module.mlp
+                moe.register_buffer('expert_class_attn', th.zeros(moe.num_expert, device=self.device))
+                moe.register_buffer('num_forwards', th.zeros(moe.num_expert, device=self.device))
                 
-                self.total_experts += module.num_expert
+                self.total_experts += moe.num_expert
 
-                old_expert_fn = module.expert_fn
+                old_expert_fn = moe.expert_fn
                 
-                bound_method = self.expert_fn.__get__(
-                    module, module.__class__
+                expert_fn = partial(self.expert_fn, module.attn)
+                bound_method = expert_fn.__get__(
+                    moe, moe.__class__
                 )
-                setattr(module, "expert_fn", bound_method)
+                setattr(moe, "expert_fn", bound_method)
 
-                self.moes[name] = (module, old_expert_fn)
+                self.moes[name] = (moe, old_expert_fn)
 
     def drop(self, keep_rate: float | int, model: nn.Module):
         num_dropped = int(self.total_experts * (1 - keep_rate))
@@ -577,24 +725,55 @@ class ClassAttnDropping(ExpertDropping):
             with th.no_grad():
                 outputs = model(samples)
 
+
         expert_class_attn_modules = []
-        expert_class_attns = th.zeros((0,), device=self.device)
+        expert_class_attns = th.zeros((0,self.total_experts//len(self.moes),), device=self.device)
         for name, (moe, old_expert_fn) in self.moes.items():
             expert_class_attn_modules.extend([(moe, expert) for expert in range(moe.num_expert)])
-            expert_class_attns = th.cat((expert_class_attns, moe.expert_class_attn), dim=0)
+            expert_class_attns = th.cat((expert_class_attns, moe.expert_class_attn.unsqueeze(dim=0)), dim=0)
             setattr(moe, "expert_fn", old_expert_fn)
         
-        # drop experts with most similarity between input and outputs
-        dropped_experts = th.argsort(expert_class_attns)[:num_dropped]
-        for dropped_expert in dropped_experts:
-            moe, expert = expert_class_attn_modules[dropped_expert]
-            moe.gate.expert_mapping[expert] = -1
+        print(f'dropped expert class attns:')
+        
+        if self.drop_local:
+            num_drop_experts_per_moe = th.linspace(0, num_dropped, len(self.moes) + 1).int()[1:]
+            num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
+
+            sorted_experts = th.argsort(expert_class_attns, dim=-1)
+
+            for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
+                num_drop: int = num_drop_experts_per_moe[i].item()  # number of experts to drop
+                if num_drop == 0:
+                    continue
+
+                dropped_experts: th.Tensor = sorted_experts[i][:num_drop]  # indices of experts to drop
+
+                new_mapping: th.Tensor = moe.gate.expert_mapping.clone()
+                new_mapping[dropped_experts] = -1  # drop experts
+                moe.gate.set_expert_mapping(mapping=new_mapping)
+
+                print(f'{expert_class_attns[i, dropped_experts]}')
+        else:
+            expert_class_attns = th.flatten(expert_class_attns)
+            # drop experts with lowest mean class attn
+            dropped_experts = th.argsort(expert_class_attns)[:num_dropped]
+            dropped_across_layers = {i: 0 for i in range(len(self.moes))}
+            for _dropped_expert in dropped_experts:
+                dropped_expert = _dropped_expert.item()
+                moe, expert = expert_class_attn_modules[dropped_expert]
+                moe.gate.expert_mapping[expert] = -1
+                layer = dropped_expert // moe.gate.tot_expert
+                dropped_across_layers[layer] += 1
+            
+            print(f'{expert_class_attns[dropped_experts]}')
+            print(f'experts dropped across layers: {dropped_across_layers}')
+            
         
         print(f'dropped {num_dropped} experts out of {self.total_experts}')
-        print(f'dropped expert similarities: {expert_class_attns[dropped_experts]}')
+    
     
     @staticmethod
-    def expert_fn(self, inp, fwd_expert_count):
+    def expert_fn(attn_block, self, inp, fwd_expert_count):
         r"""
         The default expert function which either calls the experts as a whole
         or as separate experts.
@@ -611,9 +790,7 @@ class ClassAttnDropping(ExpertDropping):
                 expert_out = experts_out[base_idx : base_idx + batch_size]
 
                 if batch_size > 0:
-                    # TODO: get class attn somehow
-                    pass
-                    # self.expert_class_attn[i] = self.expert_class_attn[i] * (old_num_forwards / self.num_forwards[i]) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (batch_size / self.num_forwards[i])
+                    self.expert_class_attn[i] = self.expert_class_attn[i] * (old_num_forwards / self.num_forwards[i]) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (batch_size / self.num_forwards[i])
 
                 base_idx += batch_size
             

@@ -22,3 +22,5 @@ results*/
 ImageNet100/*
 pretrained/*
 finetuned*
+pretrained_unscaled/*
+pretrained.tar.gz

@@ -9,6 +9,7 @@ import os
 import time
 import typing as typ
 from pathlib import Path
+import random
 
 import numpy as np
 import torch
@@ -36,7 +37,7 @@ from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
 from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping, CosineSimilarityDropping
+from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping, CosineSimilarityDropping, ClassAttnDropping
 from pruning_stages import ExpertMerging
 from samplers import RASampler
 from scheduler import CurriculumScheduler
@@ -50,6 +51,7 @@ droptypes = {
     'norm': NormDropping,
     'meanshift': MeanShiftDropping,
     'cosinesim': CosineSimilarityDropping,
+    'classattn': ClassAttnDropping,
 }
 
 
@@ -522,8 +524,6 @@ def get_args_parser():
     parser.add_argument("--gate", type=str, default="naive")
     parser.add_argument("--load-balance-scale", type=float, default=1e-1)
 
-    parser.add_argument("--expert-drop-type", default=next(iter(droptypes.keys())), choices=droptypes.keys(), help="which expert drop type to use", type=str)
-
     ExpertMerging.get_parser(parser)
     ExpertDropping.get_parser(parser)
     DropTokens.get_parser(parser)
@@ -554,7 +554,7 @@ def main(args):
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
-    # random.seed(seed)
+    random.seed(seed)
 
     cudnn.benchmark = True
 
@@ -786,11 +786,6 @@ def main(args):
     #     optimizer=optimizer,
     # )
 
-    # expert_dropping = CosineSimilarityDropping(
-    # expert_dropping = MeanShiftDropping(
-    # expert_dropping = NormDropping(
-    # expert_dropping = VolumeDropping(
-    # expert_dropping = RandomDropping(
     expert_dropping = droptypes[args.expert_drop_type](
         model=model_without_ddp,
         trainloader=data_loader_train,
