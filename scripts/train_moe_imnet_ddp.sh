@@ -12,7 +12,7 @@ echo $num_cuda
 echo $num_comma
 
 port=$((9000 + RANDOM % 1000))
-model="moe_tiny_patch16_224"
+model="moe_tiny_patch16_224" #"moe_small_patch16_224" #"moe-base_patch16_224
 lr="1e-3"
 start_threshold="0.5"
 dataset="IMNET"
