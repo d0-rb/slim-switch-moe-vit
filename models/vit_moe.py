@@ -16,6 +16,27 @@ from .model import DistilledVisionTransformer as Deit
 from .vision_transformer import Block
 
 
+def _get_weights(model):
+    weights = []
+    for block in model.blocks:
+        mlp = block.mlp
+        if isinstance(mlp, CustomizedMoEMLP):
+            weights.append((mlp.experts.htoh4.weight.data, mlp.experts.h4toh.weight.data))
+    return weights
+
+def _set_weights(model, weights_new):
+    index = 0
+    for block in model.blocks:
+        mlp = block.mlp
+        if isinstance(mlp, CustomizedMoEMLP):
+            htoh4, h4toh = weights_new[index]
+            mlp.experts.htoh4.weight.data.copy_(htoh4)
+            mlp.experts.h4toh.weight.data.copy_(h4toh)
+            # mlp.experts.htoh4.weight.data = htoh4
+            # mlp.experts.h4toh.weight.data = h4toh
+            index += 1
+    return model
+
 class CustomizedMoEMLP(FMoETransformerMLP):
     def __init__(
         self,
@@ -54,6 +75,25 @@ class CustomizedNaiveGate(NaiveGate):
         assert mapping.shape == self.expert_mapping.shape
         assert th.max(mapping) < self.tot_expert and th.min(mapping) >= 0
         self.expert_mapping.data.copy_(mapping.data)
+
+    @staticmethod
+    def apply_expert_mapping(self, inputs, output):
+        # [0,1,2,3,4,5,6]
+        # [1,1,1,0,5,0,0]
+        # output[0] = Tokes x topk
+        # [[3,2], [5, 6]] -> [[0,1], [0,0]]
+        # -1 -> skipped processing
+        # gate_top_k_idx = output[0]
+        gate_score = output[1]
+        gate_top_k_idx = self.expert_mapping[output[0]]
+        mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
+        gate_score[mask, 1] = 0
+        gate_score[mask, 0] = 1
+        gate_top_k_idx[mask, 1] = -1
+        if len(output) == 2:
+            return gate_top_k_idx, gate_score
+        else:
+            return gate_top_k_idx, gate_score, output[-1]
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):

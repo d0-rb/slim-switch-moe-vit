@@ -842,7 +842,7 @@ def main(args):
         for i in range(x.shape[0]):
             x_recon[i] = centroids[labels[i]]
         x_recon = torch.from_numpy(x_recon.reshape(shape)).cuda()
-        return x_recon
+        return x_recon, labels
 
 
     def svd(x, n_clusters=8):
@@ -866,7 +866,6 @@ def main(args):
     start_time = time.time()
     max_accuracy = 0.0
     # threshold = {}
-
     # n_clusters = 16
     weights = _get_weights(model)
     for n_clusters in range(args.num_experts, 0, -1):
@@ -887,7 +886,7 @@ def main(args):
                             h4toh_shape = h4toh.shape
                             htoh4 = htoh4.reshape(htoh4_shape[0], -1)
                             h4toh = h4toh.reshape(h4toh_shape[0], -1)
-                            result = kmeans(torch.cat((htoh4, h4toh), dim=-1), n_clusters=n_clusters, cluster_metric=args.cluster_metric)
+                            result, labels = kmeans(torch.cat((htoh4, h4toh), dim=-1), n_clusters=n_clusters, cluster_metric=args.cluster_metric)
                             htoh4, h4toh = result[:, :htoh4.shape[1]], result[:, htoh4.shape[1]:]
                             htoh4 = htoh4.reshape(htoh4_shape)
                             h4toh = h4toh.reshape(h4toh_shape)
@@ -908,14 +907,17 @@ def main(args):
                             htoh4 = svd(htoh4, n_clusters=n_clusters)
                             h4toh = svd(h4toh, n_clusters=n_clusters)
                 elif args.cluster_feature == 'feature':
+                    pass
 
                 # htoh4 = htoh4 + torch.rand(htoh4.shape, dtype=htoh4.dtype, device='cuda') * 1e-04
                 # h4toh = h4toh + torch.rand(h4toh.shape, dtype=h4toh.dtype, device='cuda') * 1e-04
                 weights_new.append((htoh4, h4toh))
                 # weights[i] = htoh4, h4toh
 
-            model = _set_weights(model, weights_new)
             # model = _set_weights(model, weights_new)
+            # expert_mapping = np
+            # model = _set_experts(expert_mapping, )
+            model = _set_weights(model, weights_new)
 
             epoch = checkpoint["epoch"]
             # if args.output_dir:
