@@ -42,7 +42,7 @@ def train_one_epoch(
     print_freq = 10
 
     if verbose == 0:
-        for samples, targets in tqdm(data_loader):
+        for samples, targets in data_loader:
             samples = samples.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
 
@@ -159,7 +159,7 @@ def evaluate(data_loader, model, device, verbose=2):
     model.eval()
 
     if verbose == 0:
-        for images, target in tqdm(data_loader):
+        for images, target in data_loader:
             images = images.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
 

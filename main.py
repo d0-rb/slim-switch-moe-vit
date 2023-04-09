@@ -876,7 +876,6 @@ def main(args):
     # skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
     # version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
     # )
-    # threshold = {}
     start_time = time.time()
     if args.eval:
         epoch = checkpoint["epoch"]
@@ -888,42 +887,36 @@ def main(args):
                     print(f'{n_clusters}, ', end=" ")
                     model = clustering(model, weights, bias, n_clusters, seed)
                     test_stats = evaluate(data_loader_val, model, device, verbose=0)
-                    # print(f'{n_clusters}, ', end=" ")
-                    # weights_new, bias_new = [], []
-                    # for i, (weight, bia) in enumerate(zip(weights, bias)):
-                    #     htoh4, h4toh = deepcopy(weight)
-                    #     htoh4_bias, h4toh_bias = deepcopy(bia)
-                    #     if args.cluster_feature == 'weight':
-                    #         htoh4_shape = htoh4.shape
-                    #         h4toh_shape = h4toh.shape
-                    #         htoh4 = htoh4.reshape(htoh4_shape[0], -1)
-                    #         h4toh = h4toh.reshape(h4toh_shape[0], -1)
-                    #         # htoh4_bias_shape = htoh4_bias.shape
-                    #         # h4toh_bias_shape = h4toh_bias.shape
-                    #         # htoh4_bias = htoh4.reshape(htoh4_bias_shape[0], -1)
-                    #         # h4toh_bias = h4toh.reshape(h4toh_bias_shape[0], -1)
-                    #         result, labels = kmeans(torch.cat((htoh4, htoh4_bias, h4toh, h4toh_bias), dim=-1), n_clusters=n_clusters, cluster_metric=args.cluster_metric, seed=seed)
-                    #         htoh4, h4toh = result[:, :htoh4.shape[1]], result[:, htoh4.shape[1]+htoh4_bias.shape[1]:htoh4.shape[1]+htoh4_bias.shape[1]+h4toh.shape[1]]
-                    #         htoh4_bias, h4toh_bias = result[:, htoh4.shape[1]:htoh4.shape[1]+htoh4_bias.shape[1]], result[:, htoh4.shape[1]+htoh4_bias.shape[1]+h4toh.shape[1]:]
-                    #         htoh4 = htoh4.reshape(htoh4_shape)
-                    #         h4toh = h4toh.reshape(h4toh_shape)
-                    #         # htoh4_bias = htoh4_bias.reshape(htoh4_bias_shape)
-                    #         # h4toh_bias = h4toh_bias.reshape(h4toh_bias_shape)
-                    #     elif args.cluster_feature == 'feature':
-                    #         pass
-                    #     weights_new.append((htoh4, h4toh))
-                    #     bias_new.append((htoh4_bias, h4toh_bias))
-                    #
-                    # model = _set_weights(model, weights_new=weights_new, bias_new=bias_new)
     elif args.cluster_finetune:
+        model_org = deepcopy(model)
         print(f"Start finetuning for {args.epochs} epochs")
-        weights_org, bias_org = deepcopy(_get_weights(model, bia=True))
-        # for n_clusters in range(args.num_experts, 0, -1):
-        # for n_clusters in [5, 10, 15, 20, 25]:
-        for n_clusters in [10, 20]:
+        # weights_org, bias_org = deepcopy(_get_weights(model, bia=True))
+        for n_clusters in range(args.num_experts, 0, -1):
             print(f'{n_clusters}, ', end=" ")
-            model = clustering(model, weights_org, bias_org, n_clusters, seed)
+            model = deepcopy(model_org)
+            #TODO: find another way to reset optimizer at every num_cluster choice
+            def param_group_fn(model: torch.nn.Module):
+                base_params = []
+                gate_params = []
+                for name, param in model.named_parameters():
+                    if "moe_gate" in name or "dense_gate" in name:
+                        gate_params.append(param)
+                    else:
+                        base_params.append(param)
+                ret = [
+                    {"params": base_params},
+                    {"params": gate_params, "lr": args.lr},
+                ]
+                return ret
+            optimizer = create_optimizer(
+                model, **optimizer_kwargs(args), param_group_fn=param_group_fn
+            )
+            loss_scaler = NativeScaler()
+            lr_scheduler, _ = create_scheduler(args, optimizer)
+            weights, bias = _get_weights(model, bia=True)
+            model = clustering(model, weights, bias, n_clusters, seed)
             test_stats = evaluate(data_loader_val, model, device, verbose=0)
+            # print()
             if args.cluster_finetune_param == 'experts':
                 for name_p, p in model.named_parameters():
                     if ".experts." in name_p:
@@ -962,59 +955,11 @@ def main(args):
                     args=args,
                     verbose=0,
                 )
-                print()
-
 
                 lr_scheduler.step(epoch)
-                # writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
-                # writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
 
-                print(f'{n_clusters}, ', end=" ")
-                test_stats = evaluate(data_loader_val, model, device, verbose=0)
-                print()
-
-                # weights, bias = _get_weights(model, bia=True)
-                # model = clustering(model, weights, bias, n_clusters, seed)
-                #
-                # print(f'{n_clusters}, ', end=" ")
-                # test_stats = evaluate(data_loader_val, model, device, verbose=0)
-                # print()
-
-                # writer.log_scalar(
-                #     "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
-                # )
-
-                # print(
-                #     f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-                # )
-
-                # writer.log_scalar("train/loss", train_stats["loss"], epoch)
-                # writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
-
-                # if "loss_attn" in train_stats:
-                #     writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
-                #
-                # if max_accuracy < test_stats["acc1"]:
-                #     # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-                #     max_accuracy = test_stats["acc1"]
-                #     if args.output_dir:
-                #         checkpoint_paths = [output_dir / "best_checkpoint.pth"]
-                #         for checkpoint_path in checkpoint_paths:
-                #             utils.save_on_master(
-                #                 {
-                #                     "model": model_without_ddp.state_dict(),
-                #                     "optimizer": optimizer.state_dict(),
-                #                     "lr_scheduler": lr_scheduler.state_dict(),
-                #                     "epoch": epoch,
-                #                     "model_ema": get_state_dict(model_ema),
-                #                     "scaler": loss_scaler.state_dict(),
-                #                     "args": args,
-                #                 },
-                #                 checkpoint_path,
-                #             )
-                #
-                # print(f"Max accuracy: {max_accuracy:.2f}%")
-                # writer.log_scalar("test/acc1/max", max_accuracy, epoch)
+            print(f'{n_clusters}, epoch {args.epochs}, ', end=" ")
+            test_stats = evaluate(data_loader_val, model, device, verbose=0)
 
     else:
         print(f"Start training for {args.epochs} epochs")
