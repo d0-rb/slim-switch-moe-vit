@@ -26,9 +26,12 @@ from timm.utils import ModelEma  # type: ignore[import]
 from timm.utils import NativeScaler  # type: ignore[import]
 from torch.optim.optimizer import Optimizer
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.cluster import KMeans
+from copy import deepcopy
 
 import models
 import utils
+from models.vit_moe import _get_weights, _set_weights
 from augment import new_data_aug_generator
 from datasets import build_dataset
 from datasets import train_val_split
@@ -498,7 +501,77 @@ def get_args_parser():
     parser.add_argument("--load-balance-scale", type=float, default=1e-1)
     parser.add_argument("--validation-size", type=float, default=0.1)
 
+    parser.add_argument("--cluster", type=str, default=None)
+    parser.add_argument("--cluster-metric", type=str, default="mse")
+    parser.add_argument("--cluster-feature", type=str, default="weight")
+    parser.add_argument("--concate", action="store_true")
+    parser.add_argument("--cluster-finetune", action="store_true")
+    parser.add_argument("--cluster-finetune-param", type=str, default="experts")
+
     return parser
+
+def kmeans(x, n_clusters=8, cluster_metric="mse", seed=0):
+    shape = x.shape
+    x = x.reshape(shape[0], -1)
+    x = x.detach().cpu().numpy()
+    if cluster_metric == "mse":
+        kmeans_estimator = KMeans(n_clusters=n_clusters, random_state=seed, n_init="auto").fit(x)
+        centroids = kmeans_estimator.cluster_centers_
+        labels = kmeans_estimator.labels_
+    elif cluster_metric == "cosine":
+        # kmeans_estimator = KernelKMeans(n_clusters=n_clusters, max_iter=300, random_state=seed, kernel="cosine", verbose=1)
+        # kmeans_estimator.fit(x)
+        # labels = kmeans_estimator.predict(x)
+        length = np.sqrt((x ** 2).sum(axis=1))[:, None]
+        x = x / length
+        kmeans_estimator = KMeans(n_clusters=n_clusters, random_state=seed, n_init="auto").fit(x)
+        len_ = np.sqrt(np.square(kmeans_estimator.cluster_centers_).sum(axis=1)[:, None])
+        # centroids = kmeans_estimator.cluster_centers_ / len_
+        # centroids = kmeans_estimator.cluster_centers_ * length
+        labels = kmeans_estimator.labels_
+
+    x_recon = np.zeros(x.shape, dtype=np.float32)
+    for i in range(x.shape[0]):
+        x_recon[i] = centroids[labels[i]]
+    x_recon = torch.from_numpy(x_recon.reshape(shape)).cuda()
+    return x_recon, labels
+
+def clustering(model, weights, bias, n_clusters, seed):
+    # with torch.no_grad():
+        # weights, bias = _get_weights(model, bia=True)
+        # print(f'{n_clusters}, ', end=" ")
+    weights_new, bias_new = [], []
+    for i, (weight, bia) in enumerate(zip(weights, bias)):
+        htoh4, h4toh = deepcopy(weight)
+        htoh4_bias, h4toh_bias = deepcopy(bia)
+        if args.cluster_feature == 'weight':
+            htoh4_shape = htoh4.shape
+            h4toh_shape = h4toh.shape
+            htoh4 = htoh4.reshape(htoh4_shape[0], -1)
+            h4toh = h4toh.reshape(h4toh_shape[0], -1)
+            result, labels = kmeans(torch.cat((htoh4, htoh4_bias, h4toh, h4toh_bias), dim=-1),
+                                    n_clusters=n_clusters, cluster_metric=args.cluster_metric, seed=seed)
+            htoh4, h4toh = result[:, :htoh4.shape[1]], result[:,
+                                                       htoh4.shape[1] + htoh4_bias.shape[1]:htoh4.shape[1] +
+                                                                                            htoh4_bias.shape[
+                                                                                                1] +
+                                                                                            h4toh.shape[1]]
+            htoh4_bias, h4toh_bias = result[:, htoh4.shape[1]:htoh4.shape[1] + htoh4_bias.shape[1]], result[:,
+                                                                                                     htoh4.shape[
+                                                                                                         1] +
+                                                                                                     htoh4_bias.shape[
+                                                                                                         1] +
+                                                                                                     h4toh.shape[
+                                                                                                         1]:]
+            htoh4 = htoh4.reshape(htoh4_shape)
+            h4toh = h4toh.reshape(h4toh_shape)
+        elif args.cluster_feature == 'feature':
+            pass
+        weights_new.append((htoh4, h4toh))
+        bias_new.append((htoh4_bias, h4toh_bias))
+
+    model = _set_weights(model, weights_new=weights_new, bias_new=bias_new)
+    return model
 
 
 def main(args):
@@ -773,7 +846,8 @@ def main(args):
         ):
             optimizer.load_state_dict(checkpoint["optimizer"])
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            args.start_epoch = checkpoint["epoch"] + 1
+            if not args.cluster_finetune:
+                args.start_epoch = checkpoint["epoch"] + 1
             if args.model_ema:
                 utils._load_checkpoint_for_ema(model_ema, checkpoint["model_ema"])
             if "scaler" in checkpoint:
@@ -790,73 +864,180 @@ def main(args):
     # skip_tk_brightness=0.4,  # skip tokens will be 40% as bright as non-skip
     # version=int(args.model[-1]) if args.model[-1].isdigit() else 1,
     # )
-
-    print(f"Start training for {args.epochs} epochs")
+    # threshold = {}
     start_time = time.time()
-    max_accuracy = 0.0
-    threshold = {}
-    try:
-        for epoch in range(args.start_epoch, args.epochs):
-            torch.cuda.reset_peak_memory_stats()
-            if args.distributed:
-                data_loader_train.sampler.set_epoch(epoch)
+    if args.eval:
+        epoch = checkpoint["epoch"]
+        print(f"Start evaluation")
+        if args.cluster == 'kmeans':
+            with torch.no_grad():
+                weights, bias = _get_weights(model, bia=True)
+                for n_clusters in range(args.num_experts, 0, -1):
+                    print(f'{n_clusters}, ', end=" ")
+                    model = clustering(model, weights, bias, n_clusters, seed)
+                    test_stats = evaluate(data_loader_val, model, device, verbose=0)
+                    # print(f'{n_clusters}, ', end=" ")
+                    # weights_new, bias_new = [], []
+                    # for i, (weight, bia) in enumerate(zip(weights, bias)):
+                    #     htoh4, h4toh = deepcopy(weight)
+                    #     htoh4_bias, h4toh_bias = deepcopy(bia)
+                    #     if args.cluster_feature == 'weight':
+                    #         htoh4_shape = htoh4.shape
+                    #         h4toh_shape = h4toh.shape
+                    #         htoh4 = htoh4.reshape(htoh4_shape[0], -1)
+                    #         h4toh = h4toh.reshape(h4toh_shape[0], -1)
+                    #         # htoh4_bias_shape = htoh4_bias.shape
+                    #         # h4toh_bias_shape = h4toh_bias.shape
+                    #         # htoh4_bias = htoh4.reshape(htoh4_bias_shape[0], -1)
+                    #         # h4toh_bias = h4toh.reshape(h4toh_bias_shape[0], -1)
+                    #         result, labels = kmeans(torch.cat((htoh4, htoh4_bias, h4toh, h4toh_bias), dim=-1), n_clusters=n_clusters, cluster_metric=args.cluster_metric, seed=seed)
+                    #         htoh4, h4toh = result[:, :htoh4.shape[1]], result[:, htoh4.shape[1]+htoh4_bias.shape[1]:htoh4.shape[1]+htoh4_bias.shape[1]+h4toh.shape[1]]
+                    #         htoh4_bias, h4toh_bias = result[:, htoh4.shape[1]:htoh4.shape[1]+htoh4_bias.shape[1]], result[:, htoh4.shape[1]+htoh4_bias.shape[1]+h4toh.shape[1]:]
+                    #         htoh4 = htoh4.reshape(htoh4_shape)
+                    #         h4toh = h4toh.reshape(h4toh_shape)
+                    #         # htoh4_bias = htoh4_bias.reshape(htoh4_bias_shape)
+                    #         # h4toh_bias = h4toh_bias.reshape(h4toh_bias_shape)
+                    #     elif args.cluster_feature == 'feature':
+                    #         pass
+                    #     weights_new.append((htoh4, h4toh))
+                    #     bias_new.append((htoh4_bias, h4toh_bias))
+                    #
+                    # model = _set_weights(model, weights_new=weights_new, bias_new=bias_new)
+    elif args.cluster_finetune:
+        print(f"Start finetuning for {args.epochs} epochs")
+        weights_org, bias_org = deepcopy(_get_weights(model, bia=True))
+        # for n_clusters in range(args.num_experts, 0, -1):
+        # for n_clusters in [5, 10, 15, 20, 25]:
+        for n_clusters in [10, 20]:
+            print(f'{n_clusters}, ', end=" ")
+            model = clustering(model, weights_org, bias_org, n_clusters, seed)
+            test_stats = evaluate(data_loader_val, model, device, verbose=0)
+            if args.cluster_finetune_param == 'experts':
+                for name_p, p in model.named_parameters():
+                    if ".experts." in name_p:
+                        p.requires_grad = True
+                    else:
+                        p.requires_grad = False
+            elif args.cluster_finetune_param == 'class-tokens':
+                for name_p, p in model.named_parameters():
+                    if "cls_token" in name_p:
+                        p.requires_grad = True
+                    else:
+                        p.requires_grad = False
+            elif args.cluster_finetune_param == 'norm':
+                for name_p, p in model.named_parameters():
+                    if ".norm1." in name_p or ".norm2." in name_p:
+                        p.requires_grad = True
+                    else:
+                        p.requires_grad = False
+            for epoch in range(args.start_epoch, args.epochs):
+                torch.cuda.reset_peak_memory_stats()
+                if args.distributed:
+                    data_loader_train.sampler.set_epoch(epoch)
 
-            train_stats = train_one_epoch(
-                model,
-                criterion,
-                data_loader_train,
-                optimizer,
-                device,
-                epoch,
-                loss_scaler,
-                args.clip_grad,
-                model_ema,
-                mixup_fn,
-                set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
-                args=args,
-            )
+                train_stats = train_one_epoch(
+                    model,
+                    criterion,
+                    data_loader_train,
+                    optimizer,
+                    device,
+                    epoch,
+                    loss_scaler,
+                    args.clip_grad,
+                    model_ema,
+                    mixup_fn,
+                    set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
+                    args=args,
+                    verbose=0,
+                )
+                print()
 
-            lr_scheduler.step(epoch)
-            writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
-            writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
 
-            if args.output_dir:
-                checkpoint_paths = [output_dir / "checkpoint.pth"]
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master(
-                        {
-                            "model": model_without_ddp.state_dict(),
-                            "optimizer": optimizer.state_dict(),
-                            "lr_scheduler": lr_scheduler.state_dict(),
-                            "epoch": epoch,
-                            "model_ema": get_state_dict(model_ema),
-                            "scaler": loss_scaler.state_dict(),
-                            "args": args,
-                        },
-                        checkpoint_path,
-                    )
+                lr_scheduler.step(epoch)
+                # writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+                # writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
 
-            test_stats = evaluate(data_loader_val, model, device)
+                print(f'{n_clusters}, ', end=" ")
+                test_stats = evaluate(data_loader_val, model, device, verbose=0)
+                print()
 
-            writer.log_scalar(
-                "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
-            )
+                weights, bias = _get_weights(model, bia=True)
+                model = clustering(model, weights, bias, n_clusters, seed)
 
-            print(
-                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-            )
+                print(f'{n_clusters}, ', end=" ")
+                test_stats = evaluate(data_loader_val, model, device, verbose=0)
+                print()
 
-            writer.log_scalar("train/loss", train_stats["loss"], epoch)
-            writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+                # writer.log_scalar(
+                #     "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+                # )
 
-            if "loss_attn" in train_stats:
-                writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
+                # print(
+                #     f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+                # )
 
-            if max_accuracy < test_stats["acc1"]:
-                # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-                max_accuracy = test_stats["acc1"]
+                # writer.log_scalar("train/loss", train_stats["loss"], epoch)
+                # writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
+
+                # if "loss_attn" in train_stats:
+                #     writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
+                #
+                # if max_accuracy < test_stats["acc1"]:
+                #     # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
+                #     max_accuracy = test_stats["acc1"]
+                #     if args.output_dir:
+                #         checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                #         for checkpoint_path in checkpoint_paths:
+                #             utils.save_on_master(
+                #                 {
+                #                     "model": model_without_ddp.state_dict(),
+                #                     "optimizer": optimizer.state_dict(),
+                #                     "lr_scheduler": lr_scheduler.state_dict(),
+                #                     "epoch": epoch,
+                #                     "model_ema": get_state_dict(model_ema),
+                #                     "scaler": loss_scaler.state_dict(),
+                #                     "args": args,
+                #                 },
+                #                 checkpoint_path,
+                #             )
+                #
+                # print(f"Max accuracy: {max_accuracy:.2f}%")
+                # writer.log_scalar("test/acc1/max", max_accuracy, epoch)
+
+    else:
+        print(f"Start training for {args.epochs} epochs")
+        max_accuracy = 0.0
+        try:
+            for epoch in range(args.start_epoch, args.epochs):
+                torch.cuda.reset_peak_memory_stats()
+                if args.distributed:
+                    data_loader_train.sampler.set_epoch(epoch)
+
+                train_stats = train_one_epoch(
+                    model,
+                    criterion,
+                    data_loader_train,
+                    optimizer,
+                    device,
+                    epoch,
+                    loss_scaler,
+                    args.clip_grad,
+                    model_ema,
+                    mixup_fn,
+                    set_training_mode=args.train_mode,  # keep in eval mode for deit finetuning / train mode for training and deit III finetuning
+                    args=args,
+                )
+
+                lr_scheduler.step(epoch)
+                writer.log_scalar("train/lr/all", optimizer.param_groups[0]["lr"], epoch)
+                writer.log_scalar("train/lr/gate", optimizer.param_groups[1]["lr"], epoch)
+
+                if args.cluster_finetune:
+                    weights, bias = _get_weights(model, bia=True)
+                    model = clustering(model, weights, bias, n_clusters, seed)
+
                 if args.output_dir:
-                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                    checkpoint_paths = [output_dir / "checkpoint.pth"]
                     for checkpoint_path in checkpoint_paths:
                         utils.save_on_master(
                             {
@@ -871,47 +1052,57 @@ def main(args):
                             checkpoint_path,
                         )
 
-            print(f"Max accuracy: {max_accuracy:.2f}%")
-            writer.log_scalar("test/acc1/max", max_accuracy, epoch)
+                test_stats = evaluate(data_loader_val, model, device)
 
-            log_stats = {
-                **{f"train_{k}": v for k, v in train_stats.items()},
-                **{f"test_{k}": v for k, v in test_stats.items()},
-                "epoch": epoch,
-                "n_parameters": n_parameters,
-            }
+                writer.log_scalar(
+                    "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
+                )
 
-            if args.output_dir and utils.is_main_process():
-                with (output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-    except KeyboardInterrupt:
-        print("stopping experiment prematurely...")
-        print("performing evaluation at different thresholds")
+                print(
+                    f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+                )
 
-    eval_threshold_list = np.linspace(
-        start=1.0,
-        stop=args.target_threshold_dense,
-        num=int((1.0 - args.starting_threshold_dense) / args.eval_threshold_step + 1),
-        endpoint=True,
-    )
+                writer.log_scalar("train/loss", train_stats["loss"], epoch)
+                writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
 
-    # for current_thresh in eval_threshold_list:
+                if "loss_attn" in train_stats:
+                    writer.log_scalar("train/loss_attn", train_stats["loss_attn"], epoch)
 
-    # for name, module in model_without_ddp.named_modules():
-    # if name.endswith("dense_gate"):
-    # module.step(current_thresh)
-    # elif name.endswith("moe_gate"):
-    # module.step(current_thresh)
+                if max_accuracy < test_stats["acc1"]:
+                    # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
+                    max_accuracy = test_stats["acc1"]
+                    if args.output_dir:
+                        checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                        for checkpoint_path in checkpoint_paths:
+                            utils.save_on_master(
+                                {
+                                    "model": model_without_ddp.state_dict(),
+                                    "optimizer": optimizer.state_dict(),
+                                    "lr_scheduler": lr_scheduler.state_dict(),
+                                    "epoch": epoch,
+                                    "model_ema": get_state_dict(model_ema),
+                                    "scaler": loss_scaler.state_dict(),
+                                    "args": args,
+                                },
+                                checkpoint_path,
+                            )
 
-    # torch.cuda.reset_peak_memory_stats()
-    # test_stats = evaluate(data_loader_val, model, device, args)
-    # writer.log_scalar(f"test_threshold/{current_thresh}", test_stats["acc1"], epoch)
+                print(f"Max accuracy: {max_accuracy:.2f}%")
+                writer.log_scalar("test/acc1/max", max_accuracy, epoch)
 
-    # print(
-    # f"Accuracy of the network at {current_thresh} threshold on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
-    # )
+                log_stats = {
+                    **{f"train_{k}": v for k, v in train_stats.items()},
+                    **{f"test_{k}": v for k, v in test_stats.items()},
+                    "epoch": epoch,
+                    "n_parameters": n_parameters,
+                }
 
-    # current_thresh -= args.eval_threshold_step
+                if args.output_dir and utils.is_main_process():
+                    with (output_dir / "log.txt").open("a") as f:
+                        f.write(json.dumps(log_stats) + "\n")
+        except KeyboardInterrupt:
+            print("stopping experiment prematurely...")
+            print("performing evaluation at different thresholds")
 
     if args.distributed:
         torch.distributed.barrier()
