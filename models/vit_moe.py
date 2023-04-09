@@ -140,6 +140,17 @@ def _set_weights(model, weights_new, bias_new=None):
             index += 1
     return model
 
+def _set_expert_mapping(model, mapping_list):
+    index = 0
+    for block in model.blocks:
+        mlp = block.mlp
+        if isinstance(mlp, CustomizedMoEMLP):
+            # if hasattr(mlp.gate, "set_expert_mapping")
+            mlp.gate.set_expert_mapping(mapping_list[index])
+            index += 1
+    return model
+
+
 
 def _make_moe(model, settings, pretrained=False):
     cnt = 0

@@ -31,7 +31,7 @@ from copy import deepcopy
 
 import models
 import utils
-from models.vit_moe import _get_weights, _set_weights
+from models.vit_moe import _get_weights, _set_weights, _set_expert_mapping
 from augment import new_data_aug_generator
 from datasets import build_dataset
 from datasets import train_val_split
@@ -541,6 +541,7 @@ def clustering(model, weights, bias, n_clusters, seed):
         # weights, bias = _get_weights(model, bia=True)
         # print(f'{n_clusters}, ', end=" ")
     weights_new, bias_new = [], []
+    mapping_list = []
     for i, (weight, bia) in enumerate(zip(weights, bias)):
         htoh4, h4toh = deepcopy(weight)
         htoh4_bias, h4toh_bias = deepcopy(bia)
@@ -551,12 +552,21 @@ def clustering(model, weights, bias, n_clusters, seed):
             h4toh = h4toh.reshape(h4toh_shape[0], -1)
             result, labels = kmeans(torch.cat((htoh4, htoh4_bias, h4toh, h4toh_bias), dim=-1),
                                     n_clusters=n_clusters, cluster_metric=args.cluster_metric, seed=seed)
-            htoh4, h4toh = result[:, :htoh4.shape[1]], result[:,
+            mapping_list.append(torch.from_numpy(labels))
+            result_counter = {k:v for (v, k) in enumerate(labels)}
+            result_all = torch.zeros((args.num_experts, result.shape[1])) # TODO: modify the assignemnt of weights
+            # result_unique = torch.zeros((n_clusters, result.shape[1]))
+            for (k,v) in result_counter.items():
+                result_all[k] = result[v, :]
+
+            htoh4, h4toh = result_all[:, :htoh4.shape[1]], result_all[:,
                                                        htoh4.shape[1] + htoh4_bias.shape[1]:htoh4.shape[1] +
                                                                                             htoh4_bias.shape[
                                                                                                 1] +
                                                                                             h4toh.shape[1]]
-            htoh4_bias, h4toh_bias = result[:, htoh4.shape[1]:htoh4.shape[1] + htoh4_bias.shape[1]], result[:,
+
+
+            htoh4_bias, h4toh_bias = result_all[:, htoh4.shape[1]:htoh4.shape[1] + htoh4_bias.shape[1]], result_all[:,
                                                                                                      htoh4.shape[
                                                                                                          1] +
                                                                                                      htoh4_bias.shape[
@@ -565,12 +575,14 @@ def clustering(model, weights, bias, n_clusters, seed):
                                                                                                          1]:]
             htoh4 = htoh4.reshape(htoh4_shape)
             h4toh = h4toh.reshape(h4toh_shape)
+
         elif args.cluster_feature == 'feature':
             pass
         weights_new.append((htoh4, h4toh))
         bias_new.append((htoh4_bias, h4toh_bias))
 
     model = _set_weights(model, weights_new=weights_new, bias_new=bias_new)
+    model = _set_expert_mapping(model, mapping_list)
     return model
 
 
@@ -961,12 +973,12 @@ def main(args):
                 test_stats = evaluate(data_loader_val, model, device, verbose=0)
                 print()
 
-                weights, bias = _get_weights(model, bia=True)
-                model = clustering(model, weights, bias, n_clusters, seed)
-
-                print(f'{n_clusters}, ', end=" ")
-                test_stats = evaluate(data_loader_val, model, device, verbose=0)
-                print()
+                # weights, bias = _get_weights(model, bia=True)
+                # model = clustering(model, weights, bias, n_clusters, seed)
+                #
+                # print(f'{n_clusters}, ', end=" ")
+                # test_stats = evaluate(data_loader_val, model, device, verbose=0)
+                # print()
 
                 # writer.log_scalar(
                 #     "cuda/mem", torch.cuda.max_memory_allocated() / 1024.0**2, epoch
