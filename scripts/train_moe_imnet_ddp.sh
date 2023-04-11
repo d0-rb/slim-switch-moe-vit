@@ -2,9 +2,10 @@
 read -p 'cuda: ' cuda
 read -p 'data path: ' datapath
 read -p 'batch size: ' batchsize
-read -p 'gate: ' gate
-read -p 'num-experts: ' num_experts
+#read -p 'gate: ' gate
+#read -p 'num-experts: ' num_experts
 read -p 'epochs: ' epochs
+read -p 'model type: ' m_type
 
 num_comma=`echo ${cuda} | tr -cd , | wc -c`
 num_cuda=$((${num_comma} + 1))
@@ -12,12 +13,14 @@ echo $num_cuda
 echo $num_comma
 
 port=$((9000 + RANDOM % 1000))
-model="moe_tiny_patch16_224"
+model="moe_${m_type}_patch16_224"
 lr="1e-3"
 start_threshold="0.5"
 dataset="IMNET"
+num_experts=32
 n=0  # seed
-validation_size=0.1
+gate='gshard'
+validation_size=0.001 # rougly 1k valid sample
 
 #CUDA_VISIBLE_DEVICES=$cuda python main.py --model $model --data-set $dataset\
 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port main.py --model $model --data-set $dataset \

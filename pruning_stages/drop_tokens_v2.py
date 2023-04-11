@@ -23,50 +23,70 @@ class KthAverageAggregator(MessagePassing):
         self.k = k
         self._num_workers = num_workers
 
-    def forward(self, embeddings, criteria, batch):
-        edge_index = pyg.nn.knn_graph(
-            criteria,
-            self.k,
-            batch,
-            loop=False,
-            cosine=True,
-            num_workers=self._num_workers,
+    def construct_graph(self, adj):
+        mask = (1 - th.eye(adj.shape[1])).repeat(adj.size(0), 1, 1).to(adj.device)
+        adj = adj * mask
+        topk_index = adj.topk(self.k, dim=-1)[1]
+        binary_adj = th.scatter(th.zeros_like(adj), dim=-1, index=topk_index, value=1.0)
+        binary_adj = (
+            (binary_adj + binary_adj.transpose(1, 2)) > 0
+        ).float()  # make symmetrical
+        adj = adj * binary_adj
+        edge_index, edge_attr = tgu.dense_to_sparse(adj)
+        return edge_index, edge_attr
+
+    def forward(self, embeddings, dense_adj):  # , batch):
+        edge_index, edge_attr = self.construct_graph(dense_adj)
+        # print(f"emb : {embeddings.shape}")
+        # print(f"edge index : {edge_index.shape}")
+        # print(f"batch : {batch.shape}")
+        # __import__("pdb").set_trace()
+        edge_index, edge_attr = self.directional_filter(
+            edge_index, edge_attr, embeddings.size(0)
         )
-        edge_index = self.directional_filter(edge_index, embeddings.size(0))
-        edge_index, _ = tgu.add_self_loops(edge_index, num_nodes=embeddings.size(0))
+        # print(f"edge index : {edge_index.shape}")
+        # print(f"batch : {batch.shape}")
+        # __import__("pdb").set_trace()
 
-        edge_index = tgu.sort_edge_index(edge_index)
+        edge_index, edge_attr = tgu.add_self_loops(
+            edge_index, edge_attr, num_nodes=embeddings.size(0)
+        )
 
-        out = self.propagate(edge_index, x=embeddings)
-        return out, edge_index
+        edge_index, edge_attr = tgu.sort_edge_index(edge_index, edge_attr)
 
-    def directional_filter(self, edge_index, num_nodes):
-        edge_index = tgu.to_undirected(edge_index)
+        out = self.propagate(edge_index, x=embeddings, edge_weights=edge_attr)
+
+        edge_index, edge_attr = tgu.remove_self_loops(edge_index, edge_attr)
+
+        return out, edge_index, edge_attr
+
+    def directional_filter(self, edge_index, edge_attrs, num_nodes):
+        # edge_index, edge_attrs = tgu.to_undirected(edge_index, edge_attr=edge_attrs)
 
         in_degree = tgu.degree(edge_index[1, :], num_nodes)
-        edge_index_degree = in_degree[edge_index]
-        cur_mask = edge_index_degree[1] > edge_index_degree[0]
+        avg_sim = th.zeros(num_nodes).to(edge_attrs.device)
+        avg_sim.index_add_(0, edge_index[1, :], edge_attrs)
+        avg_sim = avg_sim / in_degree
+        avg_node_sim = avg_sim[edge_index]
+        # __import__("pdb").set_trace()
+
+        cur_mask = avg_node_sim[1] > avg_node_sim[0]
         prev_mask = None
 
         while prev_mask is None or cur_mask.sum() != prev_mask.sum():
             edge_index = edge_index[:, cur_mask]
+            edge_attrs = edge_attrs[cur_mask]
             prev_mask = cur_mask
             in_degree = tgu.degree(edge_index[1, :], num_nodes)
-            edge_index_degree = in_degree[edge_index]
-            cur_mask = edge_index_degree[1] > edge_index_degree[0]
+            avg_sim = th.zeros(num_nodes).to(edge_attrs.device)
+            avg_sim.index_add_(0, edge_index[1, :], edge_attrs)
+            avg_sim = avg_sim / in_degree
+            avg_sim[avg_sim != avg_sim] = 0
+            avg_node_sim = avg_sim[edge_index]
+            # avg_node_sim = in_degree[edge_index]
+            cur_mask = avg_node_sim[1] > avg_node_sim[0]
 
-        return edge_index
-
-        # edge_index = edge_index.T.contiguous().tolist()
-        # directional_edges = []
-        # for src, tgt in edge_index:
-        # if degree[src] > degree[tgt]:
-        # directional_edges.append([src, tgt])
-        # # degree[tgt] -= 1
-        # directional_edges = th.tensor(directional_edges).T
-        # # __import__("pdb").set_trace()
-        # return directional_edges
-
+        return edge_index, edge_attrs
 
 class GNN(nn.Module):
 
@@ -83,79 +103,110 @@ class GNN(nn.Module):
     def feature_forward(self, skip_patch_tk, edges, edge_weights, batches):
         mean_patch_tk = self._aggr(skip_patch_tk, edges)
 
-    def forward(self, x, cls_attn, expert_distribution):
+    def forward(self, tk, attention):
+        batch, dim, device = tk.size(0), tk.size(-1), tk.device
+        # print(f"input: {x.shape}")
+        # print(f"attn: {attn.shape}")
+        # import pdb; pdb.set_trace()
+
+        # x.shape [tk+cls x Dimension]
+        # attn.shape [B x tk+cls x tk] # we got rid of the first column in hook
         if self.keep_ratio == 1.0:
-            return x, cls_attn
+            return x, attn
 
         # tk_similarity = fast_cosine_similarity(expert_attn)
-
+         # non_skip_tokens, skip_tokens,
+            # skip_attention,
+            # attention,
+            # density,
         (
-            cls_tk,
-            (patch_tk, skip_patch_tk),
-            (nsca, sca),
-            expert_patch_attn,
-        ) = self.get_tokens(x, cls_attn, expert_distribution)
-        batches = th.repeat_interleave(th.arange(x.size(0)), skip_patch_tk.size(1)).to(
-            x.device
+            cls_tk,  # 1 x D  # 1 x tk, 1 x tk
+            tk, skip_tk,
+            skip_tk_tk_attn,
+            attention,
+            density
+        ) = self.get_tokens(tk, attention)
+       
+
+        batches = th.repeat_interleave(th.arange(batch), skip_tk.size(1)).to(
+            device
         )
-        skip_patch_shape = skip_patch_tk.shape
-        skip_patch_tk = skip_patch_tk.reshape(-1, x.size(-1))  # B * T, D
-        expert_patch_attn = expert_patch_attn.reshape(-1, expert_distribution.size(-1))
-        avg_patch_tk, edges = self._aggr(skip_patch_tk, expert_patch_attn, batches)
-        # avg_patch_tk, edges = self._aggr(skip_patch_tk, skip_patch_tk, batches)
+
+        skip_tk_shape = skip_tk.shape
+        skip_tk = skip_tk.reshape(-1, dim)  # B * T, D
+        # expert_patch_attn = expert_patch_attn.reshape(-1, expert_distribution.size(-1))
+        skip_tk_embs, edges, edge_attr = self._aggr(
+            skip_tk, skip_tk_tk_attn
+        )  # batches)
 
         #################################################################################
-        avg_patch_tk = avg_patch_tk.reshape(skip_patch_shape)
-
-        node_degree = tgu.degree(edges[0, :], num_nodes=skip_patch_tk.size(0))  # B * T
+        skip_tk_embs = skip_tk_embs.reshape(skip_tk_shape)
+        
+        num_node_grouped = int(skip_tk_shape[1] * self.grouping_ratio)
+        node_degree = tgu.degree(edges[1, :], num_nodes=skip_tk.size(0))  # B * T
+        # __import__("pdb").set_trace()
         node_degree = th.stack(tgu.unbatch(node_degree, batches), dim=0)  # [B x T]
         _, group_idx = node_degree.topk(
-            k=int(skip_patch_shape[1] * self.grouping_ratio), dim=-1
+            k=num_node_grouped, dim=-1
         )
 
-        # skip_patch_tk = skip_patch_tk.reshape(skip_patch_shape)  # B * T, D
-        skip_token_summaries = index_select(
-            avg_patch_tk, group_idx
-        )  # + 0.1 * index_select(skip_patch_tk, group_idx)
-        sca = index_select(sca[:, :, None], group_idx).squeeze()
+        skip_tk_embs = index_select(
+            skip_tk_embs, group_idx
+        )  # sorting 
+        attention[:, density+1:density+1+num_node_grouped, :] = index_select(attention[:, density+1::], group_idx)
+        attention = th.transpose(attention, 1, 2) 
+        attention[:, density:density+num_node_grouped, :] = index_select(attention[:, density::], group_idx)
+        attention = th.transpose(attention, 1, 2) 
+        # truncating
+        attention = attention[:, 0:density+num_node_grouped+1, 0:density+num_node_grouped] # B x trun_tk + cls x trun_tk
 
-        return th.cat([cls_tk, patch_tk, skip_token_summaries], dim=1), th.cat(
-            [nsca, sca], dim=-1
-        )
 
-    def get_tokens(self, x, cls_attn, expert_distribution):
-        cls_x, patch_x = get_cls_token(x)
-        _, patch_expert_dist = get_cls_token(expert_distribution)
-        # cls_attn, _ = get_cls_token(cls_attn, is_attn=True)
+        return th.cat([cls_tk, tk, skip_tk_embs], dim=1), attention
 
-        return cls_x, *self.node_sparsify(patch_x, cls_attn, patch_expert_dist)
+    def get_tokens(self, x, attn):
+        cls_tk, tokens = x[:, 0:1, :], x[:, 1::, :]
+        cls_tk_attn = attn[:, 0, :]
+        # cls_self_attn = attn[:, 0:1, 0:1]
+        # cls_attn, patch_attn = get_cls_token(attn, is_attn=True)
 
-    def node_sparsify(self, x, cls_attn, patch_expert_dist):
-        x, cls_attn, patch_expert_dist = cls_attn_reordering(
-            x, cls_attn, patch_expert_dist
-        )
-
+        return cls_tk, *self.node_sparsify(cls_tk_attn, tokens, attn)
+    
+    def node_sparsify(self, sorting_vector, embeddings, attention):
+    # def node_sparsify(self, x, cls_attn, patch_attn):
+        # x, cls_attn, patch_attn = cls_attn_reordering(x, cls_attn, patch_attn)
+        x, cls_attn, attention = cls_attn_reordering(embeddings, sorting_vector, attention)
+        # x.shape [B x tk x D] (sorted)
+        # cls_attn [B x tk] (sorted)
+        # attention [B x tk+cls x tk] (sorted)
+        
         density = int(x.size(1) * self.keep_ratio)  # type: ignore[operator]
         non_skip_tokens = x[:, 0:density]
         skip_tokens = x[:, density::]
+        
+        skip_attention = attention[:, density+1::, density::] 
+        # [B x skip_tk x skip_tk] (plus 1 is to get rid of cls attn row)
+        
+        # keep_attention = attention[:, 0:density+1, 0:density+1]
+        # non_skip_patch = patch_attn[:, 0:density, 0:density]
+        # non_skip_cls_attn = cls_attn[:, 0:density]
 
-        non_skip_cls_attn = cls_attn[:, 0:density]
-        skip_cls_attn = cls_attn[:, density::]
-
-        skip_patch_attn = patch_expert_dist[:, density::]
+        # skip_patch_attn = patch_attn[:, density::, density::]
+        # skip_cls_attn = cls_attn[:, density::]
 
         return (
-            # (x, cls_attn, patch_attn),
-            (non_skip_tokens, skip_tokens),
-            (non_skip_cls_attn, skip_cls_attn),
-            skip_patch_attn,
+            # (non_skip_cls_attn, skip_cls_attn),
+            non_skip_tokens, skip_tokens,
+            skip_attention,
+            attention,
+            density,
+            # (non_skip_patch_attn, skip_patch_attn),
         )
 
 
 class DropTokens(BasePruning):
     @staticmethod
     def get_parser(parser: argparse.ArgumentParser):
-        parser.add_argument("--attn-momentum", default=0.5, type=float)
+        parser.add_argument("--attn-momentum", default=0.75, type=float)
         parser.add_argument("--finetune-epochs", default=10, type=int)
         parser.add_argument("--top-k", default=2, type=int)
 
@@ -165,33 +216,37 @@ class DropTokens(BasePruning):
         # self.layers = self.args.drop_layers
         # self.layers = [6]
         # self.layers = [2, 6, 10]
-        self.layers = [2, 6, 10]
+        self.layers = [3, 6, 9]
+        self.keep_ratios = [[0.7,0.5, 0.5], [0.7, 0.4, 0.4], [0.7, 0.3, 0.3]]
+        self.grouping_ratios = [[0.5, 0.4, 0.4], [0.5, 0.3, 0.3], [0.5, 0.2, 0.2], [0.5, 0.1, 0.1], [0.5, 0.0, 0.0]]
         # self.keep_ratios = [0.9, 0.8, 0.7, 0.6, 0.5]
         # self.keep_ratios = [0.5]
         # self.keep_ratios = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
-        self.keep_ratios = [1.0, 0.7, 0.6, 0.5]
+        # self.keep_ratios = [0.7, 0.6, 0.5]
         # self.grouping_ratios = [0.3]
         # self.grouping_ratios = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]  # 0.2, 0.1]
-        self.grouping_ratios = [0.5, 0.4, 0.3, 0.2, 0.1]
+        # self.grouping_ratios = [0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
         self.init(self.layers)
 
     def set_rate(self, keep_ratios, grouping_ratios):
         cnt = 0
         layer = self.layers
         if isinstance(keep_ratios, float):
-            keep_ratios = [keep_ratios] * len(self.layers)
+            _keep_ratios = [keep_ratios] * len(self.layers)
         else:
             assert len(keep_ratios) == len(self.layers)
+            _keep_ratios = [i for i in keep_ratios]
         if isinstance(grouping_ratios, float):
-            grouping_ratios = [grouping_ratios] * len(self.layers)
+            _grouping_ratios = [grouping_ratios] * len(self.layers)
         else:
             assert len(grouping_ratios) == len(self.layers)
+            _grouping_ratios = [i for i in grouping_ratios]
 
         for name, m in self.model.named_modules():
             if isinstance(m, (Block)):
                 if cnt in layer:
-                    m.drop_tokens.keep_ratio = keep_ratios.pop(0)
-                    m.drop_tokens.grouping_ratio = grouping_ratios.pop(0)
+                    m.drop_tokens.keep_ratio = _keep_ratios.pop(0)
+                    m.drop_tokens.grouping_ratio = _grouping_ratios.pop(0)
                 cnt += 1
 
     def main(self):
@@ -361,21 +416,23 @@ def hook_token_drop(module, input_, output):
         x = x[0]
 
     if isinstance(output, (tuple)):
-        output, cls_attn = output
+        output, attn = output
     else:
-        cls_attn = module.attn.cls_attn
+        attn = module.attn.attn.detach().clone() # shape [B x Tk + cls x Tk + clk] 
+        attn = attn[:, :, 1::] # shape [B x Tk+cls x Tk] : we don't care about the first column
+        
 
-    if hasattr(module.mlp, "gate"):
-        expert_distribution = module.mlp.gate.gate_score
-        expert_distribution = expert_distribution.view(
-            x.size(0), -1, expert_distribution.size(-1)
-        )
-        token_description = th.cat([output, expert_distribution], dim=-1)
-    else:
-        token_description = output
+    # if hasattr(module.mlp, "gate"):
+    # expert_distribution = module.mlp.gate.gate_score
+    # expert_distribution = expert_distribution.view(
+    # x.size(0), -1, expert_distribution.size(-1)
+    # )
+    # token_description = th.cat([output, expert_distribution], dim=-1)
+    # else:
+    # token_description = output
 
-    output, cls_attn = module.drop_tokens(output, cls_attn, token_description)
-    return output, cls_attn
+    output, attn = module.drop_tokens(output, attn)  # token_description)
+    return output, attn
 
 
 def forward_attn_cumulation(self, x):
@@ -383,7 +440,7 @@ def forward_attn_cumulation(self, x):
     if isinstance(x, (tuple)):
         x, prev_attn = x
     x = self._forward(self, x)
-    attn = self.attn.cls_attn
+    attn = self.attn.attn[:, :, 1::].detach().clone() # shape B x tk+cls x tk
 
     patch_attn = (1 - self.momentum) * prev_attn + self.momentum * attn
     return x, patch_attn
@@ -423,25 +480,26 @@ def plot_rows(x, keep_ratios, speed, xlabel="", ylabel="", label="", save_dir=No
 
 def index_select(x, index):
     """index_select code donated by Junru."""
-    assert len(x.shape) == 3
+    # assert len(x.shape) == 3
     B, T, D = x.shape
     index_repeat = index.unsqueeze(-1).expand(B, index.size(1), D)
     return th.gather(input=x, dim=1, index=index_repeat)
 
 
 def cls_attn_reordering(
-    patch_tk: th.Tensor,
-    cls_patch_attn: th.Tensor,
-    patch_expert_dist: th.Tensor | None = None,
+    patch_tk: th.Tensor, cls_patch_attn: th.Tensor, patch_attn: th.Tensor | None = None
 ):
-    # cls_path_attn (B x T) from B x H x N x N
-    # patch_attn B x N-1 x N-1
+    # cls_path_attn (B x Tk) from B x H x N x N
+    # patch_attn B x tk+cls x tk
     cls_path_attn_sorted, index = cls_patch_attn.sort(dim=1, descending=True)
     patch_tk_sorted = index_select(patch_tk, index)
-    if patch_expert_dist is not None:
-        patch_expert_sorted = index_select(patch_expert_dist, index)
-        return patch_tk_sorted, cls_path_attn_sorted, patch_expert_sorted
-
+    if patch_attn is not None:
+        patch_attn[:, 1::, :] = index_select(patch_attn[:, 1::, :], index) 
+        # patch_attn_sorted = index_select(patch_attn, index)
+        patch_attn = th.transpose(patch_attn, 1, 2) # B x tk x tk+cls
+        patch_attn = index_select(patch_attn, index)
+        patch_attn = th.transpose(patch_attn, 1, 2) # B x tk+cls x tk
+        return patch_tk_sorted, cls_path_attn_sorted, patch_attn
     return patch_tk_sorted, cls_path_attn_sorted
 
 

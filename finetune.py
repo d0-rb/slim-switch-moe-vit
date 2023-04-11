@@ -6,10 +6,8 @@ import argparse
 import datetime
 import json
 import os
-import time
-import typing as typ
-from pathlib import Path
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -36,9 +34,15 @@ from datasets import train_val_split
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
+from pruning_stages import ClassAttnDropping
+from pruning_stages import CosineSimilarityDropping
 from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping, CosineSimilarityDropping, ClassAttnDropping
+from pruning_stages import ExpertDropping
 from pruning_stages import ExpertMerging
+from pruning_stages import MeanShiftDropping
+from pruning_stages import NormDropping
+from pruning_stages import RandomDropping
+from pruning_stages import VolumeDropping
 from samplers import RASampler
 from scheduler import CurriculumScheduler
 from utils import TensorboardXTracker
@@ -46,12 +50,12 @@ from utils import TensorboardXTracker
 # import models_v2
 
 droptypes = {
-    'random': RandomDropping,
-    'volume': VolumeDropping,
-    'norm': NormDropping,
-    'meanshift': MeanShiftDropping,
-    'cosinesim': CosineSimilarityDropping,
-    'classattn': ClassAttnDropping,
+    "random": RandomDropping,
+    "volume": VolumeDropping,
+    "norm": NormDropping,
+    "meanshift": MeanShiftDropping,
+    "cosinesim": CosineSimilarityDropping,
+    "classattn": ClassAttnDropping,
 }
 
 
@@ -349,7 +353,9 @@ def get_args_parser():
 
     # * Finetuning params
     parser.add_argument(
-        "--finetune", default="", help="finetune from checkpoint", required=True
+        "--finetune",
+        default="",
+        help="finetune from checkpoint",
     )
     parser.add_argument("--attn-only", action="store_true")
 
@@ -543,6 +549,8 @@ def main(args):
 
     timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
     output_dir = os.path.join(args.output_dir, timestr)
+    args.output_dir = output_dir
+
     os.makedirs(output_dir, exist_ok=True)
     if args.output_dir:
         writer = TensorboardXTracker(output_dir)
@@ -597,7 +605,7 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_val = torch.utils.data.RandomSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
@@ -739,7 +747,9 @@ def main(args):
 
     loss_scaler = NativeScaler()
 
-    lr_scheduler, _ = create_scheduler(args, optimizer) if args.epochs > 0 else (None, 0)
+    lr_scheduler, _ = (
+        create_scheduler(args, optimizer) if args.epochs > 0 else (None, 0)
+    )
 
     if mixup_active:
         # smoothing is handled with mixup label transform
@@ -764,6 +774,13 @@ def main(args):
         args.distillation_tau,
     )
 
+    criterion = DistillationLoss(
+        criterion,
+        teacher_model,
+        args.distillation_type,
+        args.distillation_alpha,
+        args.distillation_tau,
+    )
     if args.resume:
         if args.resume.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -800,29 +817,29 @@ def main(args):
         model_ema=model_ema,
         mixup_fn=mixup_fn,
     )
-    # token_merge = DropTokens(
-    #     model=model_without_ddp,
-    #     trainloader=data_loader_train,
-    #     valloader=data_loader_val,
-    #     testloader=data_loader_test,
-    #     criterion=criterion,
-    #     args=args,
-    #     writer=writer,
-    #     loss_scaler=loss_scaler,
-    #     optimizer=optimizer,
-    # )
+    token_merge = DropTokens(
+        model=model,
+        trainloader=data_loader_train,
+        valloader=data_loader_val,
+        testloader=data_loader_test,
+        criterion=criterion,
+        args=args,
+        writer=writer,
+        loss_scaler=loss_scaler,
+        optimizer=optimizer,
+        device=device,
+        mixup_fn=mixup_fn,
+    )
 
     print(f"Start training for {args.epochs} epochs")
 
     #################################
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
-    #################################
-    # __import__("pdb").set_trace()
 
     # expert_merging.main()
     expert_dropping.main()
-    # token_merge.main()
+    token_merge.main()
 
     test_stats = evaluate(data_loader_test, model, device)
 

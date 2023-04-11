@@ -24,3 +24,10 @@ pretrained/*
 finetuned*
 pretrained_unscaled/*
 pretrained.tar.gz
+drop_experiments/
+pretrained_unscaled_flop/
+test/
+finetune
+drop-token.pdf
+finetune_V2
+finetune_v2/
