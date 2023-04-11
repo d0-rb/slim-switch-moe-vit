@@ -53,7 +53,7 @@ def train_one_epoch(
         with torch.cuda.amp.autocast():
             outputs = model(samples)
             loss = criterion(samples, outputs, targets)
-            loss_gate = 0
+            loss_gate = 0.0
             gate_cnt = 0
             for name, m in model.named_modules():
                 if isinstance(m, (Block)) and hasattr(m.mlp, "gate"):
