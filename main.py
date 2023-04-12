@@ -923,7 +923,7 @@ def main(args):
                         p.requires_grad = True
                     else:
                         p.requires_grad = False
-            elif args.cluster_finetune_param == 'class-tokens':
+            elif args.cluster_finetune_param == 'cls-tokens':
                 for name_p, p in model.named_parameters():
                     if "cls_token" in name_p:
                         p.requires_grad = True
