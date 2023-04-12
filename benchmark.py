@@ -264,7 +264,7 @@ parser.add_argument(
 parser.add_argument("--keeprates", default="", help="keep rates", type=str)
 parser.add_argument("--seed", default=0, help="seed", type=int)
 
-from pruning_stages import ExpertDropping
+# from pruning_stages import ExpertDropping
 
 
 def timestamp(sync=False):
@@ -330,13 +330,13 @@ class BenchmarkRunner:
             dtype=self.model_dtype,
             memory_format=torch.channels_last if self.channels_last else None,
         )
-        for name, module in self.model.named_modules():
-            if isinstance(module, CustomizedMoEMLP):
-                module.gate_hook = partial(ExpertDropping.store_gate_info, module)
-                module.register_forward_hook(
-                    partial(ExpertDropping.correct_expert_softmax, self.device)
-                )
-                continue
+        # for name, module in self.model.named_modules():
+        # if isinstance(module, CustomizedMoEMLP):
+        # module.gate_hook = partial(ExpertDropping.store_gate_info, module)
+        # module.register_forward_hook(
+        # partial(ExpertDropping.correct_expert_softmax, self.device)
+        # )
+        # continue
 
         if resume:
             if resume.startswith("https"):

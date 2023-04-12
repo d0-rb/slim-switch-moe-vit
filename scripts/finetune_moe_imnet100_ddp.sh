@@ -33,7 +33,9 @@ CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset
         --gate $gate \
         --validation-size $validation_size \
         --top-k $topk \
-        --output_dir finetune_v2/${dataset}/${model}/${gate}/lr_${lr}_ep_10_topk_${topk}/experts_${num_experts}/${n}/\
- \
         --resume \
 		pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_${epochs}/experts_${num_experts}/${n}/best_checkpoint.pth\
+        --output_dir test
+        #--output_dir finetune_v2/${dataset}/${model}/${gate}/lr_${lr}_ep_10_topk_${topk}/experts_${num_experts}/${n}/\
+ #\
+

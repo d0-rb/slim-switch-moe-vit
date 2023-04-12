@@ -88,6 +88,7 @@ class KthAverageAggregator(MessagePassing):
 
         return edge_index, edge_attrs
 
+
 class GNN(nn.Module):
 
     """Graph convolution using Attention's attn map.
@@ -115,22 +116,20 @@ class GNN(nn.Module):
             return x, attn
 
         # tk_similarity = fast_cosine_similarity(expert_attn)
-         # non_skip_tokens, skip_tokens,
-            # skip_attention,
-            # attention,
-            # density,
+        # non_skip_tokens, skip_tokens,
+        # skip_attention,
+        # attention,
+        # density,
         (
             cls_tk,  # 1 x D  # 1 x tk, 1 x tk
-            tk, skip_tk,
+            tk,
+            skip_tk,
             skip_tk_tk_attn,
             attention,
-            density
+            density,
         ) = self.get_tokens(tk, attention)
-       
 
-        batches = th.repeat_interleave(th.arange(batch), skip_tk.size(1)).to(
-            device
-        )
+        batches = th.repeat_interleave(th.arange(batch), skip_tk.size(1)).to(device)
 
         skip_tk_shape = skip_tk.shape
         skip_tk = skip_tk.reshape(-1, dim)  # B * T, D
@@ -141,25 +140,26 @@ class GNN(nn.Module):
 
         #################################################################################
         skip_tk_embs = skip_tk_embs.reshape(skip_tk_shape)
-        
+
         num_node_grouped = int(skip_tk_shape[1] * self.grouping_ratio)
         node_degree = tgu.degree(edges[1, :], num_nodes=skip_tk.size(0))  # B * T
         # __import__("pdb").set_trace()
         node_degree = th.stack(tgu.unbatch(node_degree, batches), dim=0)  # [B x T]
-        _, group_idx = node_degree.topk(
-            k=num_node_grouped, dim=-1
+        _, group_idx = node_degree.topk(k=num_node_grouped, dim=-1)
+
+        skip_tk_embs = index_select(skip_tk_embs, group_idx)  # sorting
+        attention[:, density + 1 : density + 1 + num_node_grouped, :] = index_select(
+            attention[:, density + 1 : :], group_idx
         )
-
-        skip_tk_embs = index_select(
-            skip_tk_embs, group_idx
-        )  # sorting 
-        attention[:, density+1:density+1+num_node_grouped, :] = index_select(attention[:, density+1::], group_idx)
-        attention = th.transpose(attention, 1, 2) 
-        attention[:, density:density+num_node_grouped, :] = index_select(attention[:, density::], group_idx)
-        attention = th.transpose(attention, 1, 2) 
+        attention = th.transpose(attention, 1, 2)
+        attention[:, density : density + num_node_grouped, :] = index_select(
+            attention[:, density::], group_idx
+        )
+        attention = th.transpose(attention, 1, 2)
         # truncating
-        attention = attention[:, 0:density+num_node_grouped+1, 0:density+num_node_grouped] # B x trun_tk + cls x trun_tk
-
+        attention = attention[
+            :, 0 : density + num_node_grouped + 1, 0 : density + num_node_grouped
+        ]  # B x trun_tk + cls x trun_tk
 
         return th.cat([cls_tk, tk, skip_tk_embs], dim=1), attention
 
@@ -170,22 +170,24 @@ class GNN(nn.Module):
         # cls_attn, patch_attn = get_cls_token(attn, is_attn=True)
 
         return cls_tk, *self.node_sparsify(cls_tk_attn, tokens, attn)
-    
+
     def node_sparsify(self, sorting_vector, embeddings, attention):
-    # def node_sparsify(self, x, cls_attn, patch_attn):
+        # def node_sparsify(self, x, cls_attn, patch_attn):
         # x, cls_attn, patch_attn = cls_attn_reordering(x, cls_attn, patch_attn)
-        x, cls_attn, attention = cls_attn_reordering(embeddings, sorting_vector, attention)
+        x, cls_attn, attention = cls_attn_reordering(
+            embeddings, sorting_vector, attention
+        )
         # x.shape [B x tk x D] (sorted)
         # cls_attn [B x tk] (sorted)
         # attention [B x tk+cls x tk] (sorted)
-        
+
         density = int(x.size(1) * self.keep_ratio)  # type: ignore[operator]
         non_skip_tokens = x[:, 0:density]
         skip_tokens = x[:, density::]
-        
-        skip_attention = attention[:, density+1::, density::] 
+
+        skip_attention = attention[:, density + 1 : :, density::]
         # [B x skip_tk x skip_tk] (plus 1 is to get rid of cls attn row)
-        
+
         # keep_attention = attention[:, 0:density+1, 0:density+1]
         # non_skip_patch = patch_attn[:, 0:density, 0:density]
         # non_skip_cls_attn = cls_attn[:, 0:density]
@@ -195,7 +197,8 @@ class GNN(nn.Module):
 
         return (
             # (non_skip_cls_attn, skip_cls_attn),
-            non_skip_tokens, skip_tokens,
+            non_skip_tokens,
+            skip_tokens,
             skip_attention,
             attention,
             density,
@@ -217,8 +220,14 @@ class DropTokens(BasePruning):
         # self.layers = [6]
         # self.layers = [2, 6, 10]
         self.layers = [3, 6, 9]
-        self.keep_ratios = [[0.7,0.5, 0.5], [0.7, 0.4, 0.4], [0.7, 0.3, 0.3]]
-        self.grouping_ratios = [[0.5, 0.4, 0.4], [0.5, 0.3, 0.3], [0.5, 0.2, 0.2], [0.5, 0.1, 0.1], [0.5, 0.0, 0.0]]
+        self.keep_ratios = [[0.7, 0.5, 0.5], [0.7, 0.4, 0.4], [0.7, 0.3, 0.3]]
+        self.grouping_ratios = [
+            [0.5, 0.4, 0.4],
+            [0.5, 0.3, 0.3],
+            [0.5, 0.2, 0.2],
+            [0.5, 0.1, 0.1],
+            [0.5, 0.0, 0.0],
+        ]
         # self.keep_ratios = [0.9, 0.8, 0.7, 0.6, 0.5]
         # self.keep_ratios = [0.5]
         # self.keep_ratios = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
@@ -418,9 +427,10 @@ def hook_token_drop(module, input_, output):
     if isinstance(output, (tuple)):
         output, attn = output
     else:
-        attn = module.attn.attn.detach().clone() # shape [B x Tk + cls x Tk + clk] 
-        attn = attn[:, :, 1::] # shape [B x Tk+cls x Tk] : we don't care about the first column
-        
+        attn = module.attn.attn.detach().clone()  # shape [B x Tk + cls x Tk + clk]
+        attn = attn[
+            :, :, 1::
+        ]  # shape [B x Tk+cls x Tk] : we don't care about the first column
 
     # if hasattr(module.mlp, "gate"):
     # expert_distribution = module.mlp.gate.gate_score
@@ -440,7 +450,7 @@ def forward_attn_cumulation(self, x):
     if isinstance(x, (tuple)):
         x, prev_attn = x
     x = self._forward(self, x)
-    attn = self.attn.attn[:, :, 1::].detach().clone() # shape B x tk+cls x tk
+    attn = self.attn.attn[:, :, 1::].detach().clone()  # shape B x tk+cls x tk
 
     patch_attn = (1 - self.momentum) * prev_attn + self.momentum * attn
     return x, patch_attn
@@ -494,11 +504,11 @@ def cls_attn_reordering(
     cls_path_attn_sorted, index = cls_patch_attn.sort(dim=1, descending=True)
     patch_tk_sorted = index_select(patch_tk, index)
     if patch_attn is not None:
-        patch_attn[:, 1::, :] = index_select(patch_attn[:, 1::, :], index) 
+        patch_attn[:, 1::, :] = index_select(patch_attn[:, 1::, :], index)
         # patch_attn_sorted = index_select(patch_attn, index)
-        patch_attn = th.transpose(patch_attn, 1, 2) # B x tk x tk+cls
+        patch_attn = th.transpose(patch_attn, 1, 2)  # B x tk x tk+cls
         patch_attn = index_select(patch_attn, index)
-        patch_attn = th.transpose(patch_attn, 1, 2) # B x tk+cls x tk
+        patch_attn = th.transpose(patch_attn, 1, 2)  # B x tk+cls x tk
         return patch_tk_sorted, cls_path_attn_sorted, patch_attn
     return patch_tk_sorted, cls_path_attn_sorted
 
