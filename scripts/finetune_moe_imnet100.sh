@@ -20,7 +20,8 @@ datapath="../ImageNet100"
 # gate="naive"
 num_experts="32"
 # batchsize="256"
-epochs="50"
+# epochs="50"
+epochs="0"
 
 for gate in "gshard" "naive";
 # for gate in "gshard";
@@ -31,7 +32,7 @@ do
         for droptype in "cosinesim";
         do
             for droplocal in "false" "true";
-            # for droplocal in "false";
+            # for droplocal in "true";
             do
                 # CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset \
                 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port finetune.py --model $model --data-set $dataset \

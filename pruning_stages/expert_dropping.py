@@ -632,6 +632,7 @@ class CosineSimilarityDropping(ExpertDropping):
                 moe.gate.set_expert_mapping(mapping=new_mapping)
 
                 print(f'{expert_similarities[i, dropped_experts]}')
+                # print(f'{expert_similarities[i]}')
         else:
             expert_similarities = th.flatten(expert_similarities)
             # drop experts with highest cosine similarity
@@ -663,13 +664,15 @@ class CosineSimilarityDropping(ExpertDropping):
             for i in range(self.num_expert):
                 batch_size = fwd_expert_count[i]
                 old_num_forwards = self.num_forwards[i]
-                self.num_forwards[i] += batch_size
+                new_num_forwards = old_num_forwards + batch_size
                 expert_in = inp[base_idx : base_idx + batch_size]
                 expert_out = experts_out[base_idx : base_idx + batch_size]
 
                 if batch_size > 0:
-                    self.expert_similarity[i] = self.expert_similarity[i] * (old_num_forwards / self.num_forwards[i]) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (batch_size / self.num_forwards[i])
+                    mean_cosine_similarity = F.cosine_similarity(expert_in, expert_out, dim=1).mean()
+                    self.expert_similarity[i] = self.expert_similarity[i] * (old_num_forwards / new_num_forwards) + mean_cosine_similarity * (batch_size / new_num_forwards)
 
+                self.num_forwards[i] = new_num_forwards
                 base_idx += batch_size
             
             return experts_out
