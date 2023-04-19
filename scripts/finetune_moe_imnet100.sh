@@ -20,13 +20,15 @@ datapath="../ImageNet100"
 # gate="naive"
 num_experts="32"
 # batchsize="256"
-# epochs="50"
-epochs="0"
+epochs="50"
+# epochs="0"
 
-for gate in "gshard" "naive";
-# for gate in "gshard";
+# for gate in "gshard" "naive";
+for gate in "gshard";
 do
-    for keeprate in "0.1" "0.2" "0.3" "0.4" "0.5" "0.6" "0.7" "0.8" "0.9";
+    # for keeprate in "0.1" "0.2" "0.3" "0.4" "0.5" "0.6" "0.7" "0.8" "0.9";
+    # for keeprate in "0.3" "0.4" "0.5" "0.6" "0.7" "0.8" "0.9";
+    for keeprate in "0.9";
     do
         # for droptype in "cosinesim" "random" "norm" "meanshift" "volume";
         for droptype in "cosinesim";
@@ -48,6 +50,7 @@ do
                         --expert-keep-rate $keeprate \
                         --expert-drop-type $droptype \
                         --expert-drop-local $droplocal \
+                        --tome-keep-rate 0.7 \
                         --finetune \
                         pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_1200/experts_${num_experts}/0/best_checkpoint.pth \
                         --output_dir \
