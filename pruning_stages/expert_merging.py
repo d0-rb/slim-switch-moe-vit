@@ -34,11 +34,16 @@ class ExpertMerging(BasePruning):
     def prune(self, *args, **kwargs):
         print("setting baseline loss")
         baseline_info = evaluate(self.valloader, self.model, self.device)
+
         experts_mapping, experts_parameters = self.get_experts_mapping()
+        # experts_mapping: typ.List[th.Tensor]
+        # expedrts_parameters: typ.List[Th.Tensor]
+
         expert_parameters_copy = copy.deepcopy(experts_parameters)
         expert_mappings_copy = copy.deepcopy(experts_mapping)
 
         alphas = th.linspace(start=0, end=1, steps=self.args.experts_merge_step)
+
         for layer, (mapping, parameters, cp_mapping, cp_parameters) in enumerate(
             zip(
                 experts_mapping,
@@ -47,6 +52,9 @@ class ExpertMerging(BasePruning):
                 expert_parameters_copy,
             )
         ):
+            # TODO: check for -1 experts
+            # mapping =[0,1,2,3,4,5,6,7,8,9....32]
+            # mapping = [0,-1,1-1,-1,1-,1-1,1, ...32]
             unique_experts = mapping.unique().tolist()
             num_experts = len(unique_experts)
             stability_mx = th.zeros(
@@ -66,9 +74,9 @@ class ExpertMerging(BasePruning):
                         expert_2,
                         alphas,
                         baseline_info,
-                    )
+                    )  # size is equal to alphas
 
-            mean_stability_mx = stability_mx.mean(dim=-1)
+            mean_stability_mx = stability_mx.mean(dim=-1)  # [ E x E x |a| ] -> [E x E]
             mean_stability_mx = (
                 mean_stability_mx + mean_stability_mx.T
             )  # get full matrix
@@ -76,32 +84,54 @@ class ExpertMerging(BasePruning):
                 mean_stability_mx > self.args.experts_merge_threshold
             ] = float("inf")
             mean_stability_mx.fill_diagonal_(float("inf"))
+
             score, candidates = mean_stability_mx.topk(k=1, dim=-1, largest=False)
+            ###
+            # mean_stability_mx.shape [E x E]
+            # score [E] -> store value
+            # candidates [E] -> store index
+            ###
             expert_queue = th.argsort(score.squeeze()).flip(dims=(0,)).tolist()
+            ###
+            # expert_queue -> [E} -> store index
+
+            ###
             seen = th.zeros(num_experts).bool()
+            # seen |E| -> keep track of experts i already merged
             while expert_queue:
                 expert = expert_queue.pop(0)
                 scr = score[expert]
                 if scr == float("inf") or seen[expert]:
                     continue
+
                 candidate = candidates[expert].squeeze().item()
                 if seen[candidate]:
                     continue
+
                 alpha_idx = stability_mx[expert, candidate].topk(
                     k=1, dim=-1, largest=False
                 )[1]
+                #####
+                # stability_mx -> |E x E x alphas|
+
+                #####
+
                 alpha = alphas[alpha_idx].item()
 
-                expert_src = min(expert, candidate)
-                expert_tgt = max(expert, candidate)
+                # expert_src = min(expert, candidate)
+                # expert_tgt = max(expert, candidate)
+                ####
+                # expert_src = alpha * expert_src + (1-alpha) * expert_tgt
+
+                ####
 
                 self._merge_experts(
                     parameters,
                     cp_parameters,
                     mapping,
                     cp_mapping,
-                    expert_tgt,
-                    expert_src,
+                    expert,
+                    candidate,
                     alpha,
                 )
 

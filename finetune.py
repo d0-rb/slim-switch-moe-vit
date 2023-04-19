@@ -852,7 +852,7 @@ def main(args):
     # pruning / fine-tuning should be self-contained under that class
 
     # expert_dropping.main()
-    # expert_merging.main()
+    expert_merging.main()
     # token_merge.main()
     # tome_merge.main()
 
