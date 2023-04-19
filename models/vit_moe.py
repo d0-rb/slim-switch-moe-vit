@@ -92,8 +92,22 @@ class CustomizedGshardGate(GShardGate):
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
         gate_score = output[1].clone()
-        gate_top_k_idx = self.expert_mapping[output[0]]
+        gate_top_k_idx = self.expert_mapping[output[0]]  # (B * T, 2)
         mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
+
+        skipped_experts = gate_top_k_idx == -1
+        # double_skipped = skipped_experts.sum(dim=1) == 2
+        # first_skipped = skipped_experts[:, 0] * ~double_skipped
+        first_skipped = skipped_experts[:, 0]
+        # second_skipped = skipped_experts[:, 1] * ~double_skipped
+        second_skipped = skipped_experts[:, 1]
+
+        # get the sum of unskipped expert softmaxes
+        gate_score[first_skipped, 0] = 0
+        gate_score[first_skipped, 1] = 1 - gate_score[first_skipped, 1].detach() + gate_score[first_skipped, 1]
+        gate_score[second_skipped, 0] = 1 - gate_score[second_skipped, 0].detach() + gate_score[second_skipped, 0]
+        gate_score[second_skipped, 1] = 0
+
         gate_score[mask, 1] = 0
         gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
         gate_top_k_idx[mask, 1] = -1

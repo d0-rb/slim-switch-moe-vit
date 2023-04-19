@@ -31,6 +31,12 @@ class ExpertDropping(BasePruning):
             help="what percentage of experts to keep",
         )
         parser.add_argument(
+            "--expert-drop-amt",
+            default=0,
+            type=int,
+            help="how many experts to drop, if 0, ignore and use keep rate instead",
+        )
+        parser.add_argument(
             "--expert-drop-type",
             default="random",
             choices=["random", "volume", "norm", "meanshift", "cosinesim"],
@@ -779,10 +785,6 @@ class CosineSimilarityDropping(ExpertDropping):
             )
             setattr(moe, "expert_fn", old_expert_fn)
         expert_similarities[expert_similarities == 0] = float("inf")
-
-        print(f"dropped expert similarities:")
-        print(expert_similarities)
-        __import__("pdb").set_trace()
 
         if self.drop_local:
             num_drop_experts_per_moe = th.linspace(
