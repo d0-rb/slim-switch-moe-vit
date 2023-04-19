@@ -31,10 +31,10 @@ class ExpertDropping(BasePruning):
             help="what percentage of experts to keep",
         )
         parser.add_argument(
-            "--expert-drop-amt",
+            "--expert-drop-count",
             default=0,
             type=int,
-            help="how many experts to drop, if 0, ignore and use keep rate instead",
+            help="how many experts to drop. if 0, ignore and use keep rate instead",
         )
         parser.add_argument(
             "--expert-drop-type",
@@ -66,7 +66,7 @@ class ExpertDropping(BasePruning):
     ):
         super().__init__(**kwargs)
         self.model: nn.Module = model
-        self.keep_rate = args.expert_keep_rate
+        self.keep_rate: float = args.expert_keep_rate
         self.device = th.device(args.device)
         self.testLoader = testloader
         self.valLoader = valloader
@@ -88,12 +88,13 @@ class ExpertDropping(BasePruning):
         )
         self.drop_local = args.expert_drop_local
         self.do_finetune = args.epochs > 0
+        self.expert_drop_count: int = args.expert_drop_count
 
     def prune(self, *args, **kwargs):
         if not 0 <= self.keep_rate <= 1:
             raise ValueError("expert_keep_rate must be in range [0, 1]")
 
-        dropped = self.drop(keep_rate=self.keep_rate, model=self.model)
+        dropped = self.drop(keep_rate=self.expert_drop_count if self.expert_drop_count else self.keep_rate, model=self.model)
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedNaiveGate) or isinstance(
                 module, CustomizedGshardGate
@@ -276,7 +277,10 @@ class RandomDropping(ExpertDropping):
             or isinstance(module, CustomizedGshardGate)
         ]
         total_experts = sum(gate.tot_expert for gate in gates)
-        num_dropped = int(total_experts * (1 - keep_rate))
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
 
         if self.drop_local:
             num_drop_experts_per_gate = th.linspace(
@@ -349,7 +353,10 @@ class VolumeDropping(ExpertDropping):
                 self.gates[name] = (module, hook)
 
     def drop(self, keep_rate: float | int, model: nn.Module):
-        num_dropped = int(self.total_experts * (1 - keep_rate))
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
 
         self.model.eval()
         for samples, targets in self.valLoader:
@@ -463,7 +470,10 @@ class NormDropping(ExpertDropping):
                 self.moes[name] = (module, old_expert_fn)
 
     def drop(self, keep_rate: float | int, model: nn.Module):
-        num_dropped = int(self.total_experts * (1 - keep_rate))
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
 
         self.model.eval()
         for samples, targets in self.valLoader:
@@ -609,7 +619,10 @@ class MeanShiftDropping(ExpertDropping):
                 self.moes[name] = (module, old_expert_fn)
 
     def drop(self, keep_rate: float | int, model: nn.Module):
-        num_dropped = int(self.total_experts * (1 - keep_rate))
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
 
         self.model.eval()
         for samples, targets in self.valLoader:
@@ -758,7 +771,10 @@ class CosineSimilarityDropping(ExpertDropping):
                 self.moes[name] = (module, old_expert_fn)
 
     def drop(self, keep_rate: float | int, model: nn.Module):
-        num_dropped = int(self.total_experts * (1 - keep_rate))
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
 
         self.model.eval()
         for samples, targets in self.valLoader:
@@ -906,7 +922,10 @@ class ClassAttnDropping(ExpertDropping):
                 self.moes[name] = (moe, old_expert_fn)
 
     def drop(self, keep_rate: float | int, model: nn.Module):
-        num_dropped = int(self.total_experts * (1 - keep_rate))
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
 
         self.model.eval()
         for samples, targets in self.valLoader:
