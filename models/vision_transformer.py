@@ -272,7 +272,11 @@ class Attention(nn.Module):
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
+        self.mean_cls_attn = attn[:, :, 0, :].mean(dim=(0, 1,))
         attn = self.attn_drop(attn)
+
+        self.attn = attn.sum(dim=1)  # [:, 0, 1::]
+        self.cls_attn = self.attn[:, 0, 1::]
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)

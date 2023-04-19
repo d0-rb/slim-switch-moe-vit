@@ -12,6 +12,7 @@ import time
 from collections import OrderedDict
 from contextlib import suppress
 from functools import partial
+from pathlib import Path
 
 import torch.nn as nn
 import torch.nn.parallel
@@ -24,9 +25,10 @@ from timm.utils import AverageMeter
 from timm.utils import setup_default_logging
 
 import models
-from models.vit_moe import CustomizedNaiveGate, CustomizedGshardGate, CustomizedMoEMLP
+from models.vit_moe import CustomizedGshardGate
+from models.vit_moe import CustomizedMoEMLP
+from models.vit_moe import CustomizedNaiveGate
 from utils import TensorboardXTracker
-from pathlib import Path
 
 has_apex = False
 try:
@@ -256,11 +258,13 @@ parser.add_argument("--num-rep", default=14, type=int)
 parser.add_argument("--num_experts", default=32, type=int)
 parser.add_argument("--gate", default="naive", type=str)
 parser.add_argument("--resume", default="", help="resume from checkpoint", type=str)
-parser.add_argument("--output_dir", default="", help="path where to save, empty for no saving", type=str)
-parser.add_argument("--keeprates", default='', help="keep rates", type=str)
+parser.add_argument(
+    "--output_dir", default="", help="path where to save, empty for no saving", type=str
+)
+parser.add_argument("--keeprates", default="", help="keep rates", type=str)
 parser.add_argument("--seed", default=0, help="seed", type=int)
 
-from pruning_stages import ExpertDropping
+# from pruning_stages import ExpertDropping
 
 
 def timestamp(sync=False):
@@ -306,28 +310,33 @@ class BenchmarkRunner:
         resume="",
         **kwargs,
     ):
+
         self.model_name = model_name
         self.detail = detail
         self.device = device
         self.use_amp, self.model_dtype, self.data_dtype = resolve_precision(precision)
         self.channels_last = kwargs.pop("channels_last", False)
         self.amp_autocast = torch.cuda.amp.autocast if self.use_amp else suppress
-
-        self.model = eval(f"models.{model_name}")  # resvit_tiny_patch16_224_expert8_gcn
-        self.model_name = self.model.__name__
-        self.model = self.model(**kwargs)
-        
-        for name, module in self.model.named_modules():
-            if isinstance(module, CustomizedMoEMLP):
-                module.gate_hook = partial(ExpertDropping.store_gate_info, module)
-                module.register_forward_hook(partial(ExpertDropping.correct_expert_softmax, self.device))
-                continue
+        # self.model = kwargs.get("model", eval(f"models.{model_name}"))
+        if "model_object" not in kwargs:
+            self.model = eval(f"models.{model_name}")
+            self.model = self.model(**kwargs)
+            self.model_name = self.model.__name__
+        else:
+            self.model = kwargs["model_object"]
 
         self.model.to(
             device=self.device,
             dtype=self.model_dtype,
             memory_format=torch.channels_last if self.channels_last else None,
         )
+        # for name, module in self.model.named_modules():
+        # if isinstance(module, CustomizedMoEMLP):
+        # module.gate_hook = partial(ExpertDropping.store_gate_info, module)
+        # module.register_forward_hook(
+        # partial(ExpertDropping.correct_expert_softmax, self.device)
+        # )
+        # continue
 
         if resume:
             if resume.startswith("https"):
@@ -337,7 +346,7 @@ class BenchmarkRunner:
             else:
                 checkpoint = torch.load(resume, map_location="cpu")
             self.model.load_state_dict(checkpoint["model"], strict=False)
-        
+
         self.num_classes = self.model.num_classes
         self.param_count = count_params(self.model)
         _logger.info(
@@ -372,7 +381,15 @@ class BenchmarkRunner:
 
 
 class InferenceBenchmarkRunner(BenchmarkRunner):
-    def __init__(self, model_name, device="cuda", torchscript=False, writer=None, keeprate=1.0, **kwargs):
+    def __init__(
+        self,
+        model_name,
+        device="cuda",
+        torchscript=False,
+        writer=None,
+        keeprate=1.0,
+        **kwargs,
+    ):
         super().__init__(
             model_name=model_name, device=device, torchscript=torchscript, **kwargs
         )
@@ -423,10 +440,16 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
             img_size=self.input_size[-1],
             param_count=round(self.param_count / 1e6, 2),
         )
-        
+
         if self.writer:
-            self.writer.log_scalar("samples_per_sec", results['samples_per_sec'], self.keeprate)
-            self.writer.log_scalar(f"batch_{results['batch_size']}_time", results['step_time'], self.keeprate)
+            self.writer.log_scalar(
+                "samples_per_sec", results["samples_per_sec"], self.keeprate
+            )
+            self.writer.log_scalar(
+                f"batch_{results['batch_size']}_time",
+                results["step_time"],
+                self.keeprate,
+            )
 
         _logger.info(
             f"Inference benchmark of {self.model_name} done. "
@@ -638,7 +661,7 @@ def main():
 
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    
+
     # timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
     # output_dir = os.path.join(args.output_dir, timestr)
     output_dir = args.output_dir
@@ -647,14 +670,19 @@ def main():
         args.writer = TensorboardXTracker(output_dir)
     output_dir = Path(args.output_dir)
 
-    keeprates = [float(keeprate) for keeprate in args.keeprates.split(',')]
+    keeprates = [float(keeprate) for keeprate in args.keeprates.split(",")]
     resume_root = args.resume
 
     for keeprate in keeprates:
         if keeprate == 1.0 or keeprate == 0.0:
-            args.resume = os.path.join(os.path.dirname(resume_root), f'cosinesim/keeprate_{keeprate}/{args.seed}/checkpoint.pth')
+            args.resume = os.path.join(
+                os.path.dirname(resume_root),
+                f"cosinesim/keeprate_{keeprate}/{args.seed}/checkpoint.pth",
+            )
         else:
-            args.resume = os.path.join(resume_root, f'keeprate_{keeprate}/{args.seed}/checkpoint.pth')
+            args.resume = os.path.join(
+                resume_root, f"keeprate_{keeprate}/{args.seed}/checkpoint.pth"
+            )
         args.keeprate = keeprate
         if args.model_list:
             args.model = ""

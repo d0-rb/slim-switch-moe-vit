@@ -53,7 +53,7 @@ def train_one_epoch(
         with torch.cuda.amp.autocast():
             outputs = model(samples)
             loss = criterion(samples, outputs, targets)
-            loss_gate = 0
+            loss_gate = 0.0
             gate_cnt = 0
             for name, m in model.named_modules():
                 if isinstance(m, (Block)) and hasattr(m.mlp, "gate"):
@@ -95,8 +95,13 @@ def train_one_epoch(
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+def pprint(*args, verbose):
+    if verbose:
+        print(*args)
+
+
 @torch.no_grad()
-def evaluate(data_loader, model, device):
+def evaluate(data_loader, model, device, verbose=True):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -105,7 +110,9 @@ def evaluate(data_loader, model, device):
     # switch to evaluation mode
     model.eval()
 
-    for images, target in metric_logger.log_every(data_loader, 10, header):
+    for images, target in metric_logger.log_every(
+        data_loader, 10, header, verbose=verbose
+    ):
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
@@ -122,10 +129,11 @@ def evaluate(data_loader, model, device):
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print(
+    pprint(
         "* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}".format(
             top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss
-        )
+        ),
+        verbose=verbose,
     )
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

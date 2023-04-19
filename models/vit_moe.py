@@ -59,8 +59,16 @@ class CustomizedNaiveGate(NaiveGate):
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
-        self.gate_score = output[1].detach().clone()
-        return self.expert_mapping[output[0]], *output[1::]
+        gate_score = output[1].clone()
+        gate_top_k_idx = self.expert_mapping[output[0]]
+        mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
+        gate_score[mask, 1] = 0
+        gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
+        gate_top_k_idx[mask, 1] = -1
+        if len(output) == 2:
+            return gate_top_k_idx, gate_score
+        else:
+            return gate_top_k_idx, gate_score, output[-1]
 
 
 class CustomizedGshardGate(GShardGate):
@@ -83,8 +91,16 @@ class CustomizedGshardGate(GShardGate):
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
-        self.gate_score = output[1]
-        return self.expert_mapping[output[0]], *output[1::]
+        gate_score = output[1].clone()
+        gate_top_k_idx = self.expert_mapping[output[0]]
+        mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
+        gate_score[mask, 1] = 0
+        gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
+        gate_top_k_idx[mask, 1] = -1
+        if len(output) == 2:
+            return gate_top_k_idx, gate_score
+        else:
+            return gate_top_k_idx, gate_score, output[-1]
 
 
 from .model import deit_tiny_patch16_224
@@ -92,8 +108,53 @@ from .model import deit_small_patch16_224
 from .model import deit_base_patch16_224
 
 
+def _get_weights(model, bia=True):
+    weights = []
+    if bia:
+        bias = []
+    for block in model.blocks:
+        mlp = block.mlp
+        if isinstance(mlp, CustomizedMoEMLP):
+            weights.append(
+                (mlp.experts.htoh4.weight.data, mlp.experts.h4toh.weight.data)
+            )
+            if bia:
+                bias.append((mlp.experts.htoh4.bias.data, mlp.experts.h4toh.bias.data))
+    return weights, bias
+
+
+def _set_weights(model, weights_new, bias_new=None):
+    index = 0
+    for block in model.blocks:
+        mlp = block.mlp
+        if isinstance(mlp, CustomizedMoEMLP):
+            htoh4, h4toh = weights_new[index]
+            mlp.experts.htoh4.weight.data.copy_(htoh4)
+            mlp.experts.h4toh.weight.data.copy_(h4toh)
+            if bias_new is not None:
+                htoh4_bias, h4toh_bias = bias_new[index]
+                mlp.experts.htoh4.bias.data.copy_(htoh4_bias)
+                mlp.experts.h4toh.bias.data.copy_(h4toh_bias)
+            # mlp.experts.htoh4.weight.data = htoh4
+            # mlp.experts.h4toh.weight.data = h4toh
+            index += 1
+    return model
+
+
+def _set_expert_mapping(model, mapping_list):
+    index = 0
+    for block in model.blocks:
+        mlp = block.mlp
+        if isinstance(mlp, CustomizedMoEMLP):
+            # if hasattr(mlp.gate, "set_expert_mapping")
+            mlp.gate.set_expert_mapping(mapping_list[index])
+            index += 1
+    return model
+
+
 def _make_moe(model, settings, pretrained=False):
     cnt = 0
+    # hidden_dim = settings["embed_dim"] * settings["mlp_ratio"]
     hidden_dim = (settings["embed_dim"] * settings["mlp_ratio"]) // 2
     for name, module in model.named_modules():
         if isinstance(module, Block):

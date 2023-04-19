@@ -6,8 +6,8 @@ import argparse
 import datetime
 import json
 import os
+import random
 import time
-import typing as typ
 from pathlib import Path
 
 import numpy as np
@@ -35,9 +35,16 @@ from datasets import train_val_split
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
+from pruning_stages import ClassAttnDropping
+from pruning_stages import CosineSimilarityDropping
 from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping, CosineSimilarityDropping
+from pruning_stages import ExpertDropping
 from pruning_stages import ExpertMerging
+from pruning_stages import MeanShiftDropping
+from pruning_stages import NormDropping
+from pruning_stages import RandomDropping
+from pruning_stages import ToMeDrop
+from pruning_stages import VolumeDropping
 from samplers import RASampler
 from scheduler import CurriculumScheduler
 from utils import TensorboardXTracker
@@ -45,11 +52,12 @@ from utils import TensorboardXTracker
 # import models_v2
 
 droptypes = {
-    'random': RandomDropping,
-    'volume': VolumeDropping,
-    'norm': NormDropping,
-    'meanshift': MeanShiftDropping,
-    'cosinesim': CosineSimilarityDropping,
+    "random": RandomDropping,
+    "volume": VolumeDropping,
+    "norm": NormDropping,
+    "meanshift": MeanShiftDropping,
+    "cosinesim": CosineSimilarityDropping,
+    "classattn": ClassAttnDropping,
 }
 
 
@@ -347,7 +355,9 @@ def get_args_parser():
 
     # * Finetuning params
     parser.add_argument(
-        "--finetune", default="", help="finetune from checkpoint", required=True
+        "--finetune",
+        default="",
+        help="finetune from checkpoint",
     )
     parser.add_argument("--attn-only", action="store_true")
 
@@ -522,8 +532,6 @@ def get_args_parser():
     parser.add_argument("--gate", type=str, default="naive")
     parser.add_argument("--load-balance-scale", type=float, default=1e-1)
 
-    parser.add_argument("--expert-drop-type", default=next(iter(droptypes.keys())), choices=droptypes.keys(), help="which expert drop type to use", type=str)
-
     ExpertMerging.get_parser(parser)
     ExpertDropping.get_parser(parser)
     DropTokens.get_parser(parser)
@@ -543,6 +551,8 @@ def main(args):
 
     timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
     output_dir = os.path.join(args.output_dir, timestr)
+    args.output_dir = output_dir
+
     os.makedirs(output_dir, exist_ok=True)
     if args.output_dir:
         writer = TensorboardXTracker(output_dir)
@@ -554,14 +564,14 @@ def main(args):
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
-    # random.seed(seed)
+    random.seed(seed)
 
     cudnn.benchmark = True
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
 
     dataset_train, dataset_val = train_val_split(
-        dataset_train, val_size=0.1, seed=args.seed
+        dataset_train, val_size=args.validation_size, seed=args.seed
     )
     dataset_test, _ = build_dataset(is_train=False, args=args)
 
@@ -597,7 +607,7 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_test = torch.utils.data.SequentialSampler(dataset_test)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_val = torch.utils.data.RandomSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
@@ -739,7 +749,9 @@ def main(args):
 
     loss_scaler = NativeScaler()
 
-    lr_scheduler, _ = create_scheduler(args, optimizer) if args.epochs > 0 else (None, 0)
+    lr_scheduler, _ = (
+        create_scheduler(args, optimizer) if args.epochs > 0 else (None, 0)
+    )
 
     if mixup_active:
         # smoothing is handled with mixup label transform
@@ -775,24 +787,38 @@ def main(args):
 
     # example declaration feel free to chang anything
     # expert_merging = ExpertMerging(
-    #     model=model_without_ddp,
-    #     trainloader=data_loader_train,
-    #     valloader=data_loader_val,
-    #     testloader=data_loader_test,
-    #     criterion=criterion,
-    #     args=args,
-    #     writer=writer,
-    #     loss_scaler=loss_scaler,
-    #     optimizer=optimizer,
+    # model=model_without_ddp,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # lr_scheduler=lr_scheduler,
+    # model_ema=model_ema,
+    # mixup_fn=mixup_fn,
+    # device=device,
     # )
 
-    # expert_dropping = CosineSimilarityDropping(
-    # expert_dropping = MeanShiftDropping(
-    # expert_dropping = NormDropping(
-    # expert_dropping = VolumeDropping(
-    # expert_dropping = RandomDropping(
-    expert_dropping = droptypes[args.expert_drop_type](
-        model=model_without_ddp,
+    # expert_dropping = droptypes[args.expert_drop_type](
+    # model=model_without_ddp,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # lr_scheduler=lr_scheduler,
+    # model_ema=model_ema,
+    # mixup_fn=mixup_fn,
+    # device=device,
+    # )
+    token_merge = DropTokens(
+        model=model,
         trainloader=data_loader_train,
         valloader=data_loader_val,
         testloader=data_loader_test,
@@ -801,20 +827,21 @@ def main(args):
         writer=writer,
         loss_scaler=loss_scaler,
         optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
+        device=device,
         mixup_fn=mixup_fn,
     )
-    # token_merge = DropTokens(
-    #     model=model_without_ddp,
-    #     trainloader=data_loader_train,
-    #     valloader=data_loader_val,
-    #     testloader=data_loader_test,
-    #     criterion=criterion,
-    #     args=args,
-    #     writer=writer,
-    #     loss_scaler=loss_scaler,
-    #     optimizer=optimizer,
+    # tome_merge = ToMeDrop(
+    # model=model,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # device=device,
+    # mixup_fn=mixup_fn,
     # )
 
     print(f"Start training for {args.epochs} epochs")
@@ -822,14 +849,16 @@ def main(args):
     #################################
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
-    #################################
-    # __import__("pdb").set_trace()
 
-    # expert_merging.main()
-    expert_dropping.main()
-    # token_merge.main()
+    # expert_dropping.prune()
+    # expert_merging.prune()
+    # token_merge.prune()
 
-    test_stats = evaluate(data_loader_test, model, device)
+    # expert_dropping.main()
+    token_merge.main()
+    # tome_merge.main()
+
+    # test_stats = evaluate(data_loader_test, model, device)
 
     writer.close()
 
@@ -846,5 +875,6 @@ if __name__ == "__main__":
         args.target_threshold_moe = args.target_threshold
 
     if args.output_dir:
+        print(f"output dir: {args.output_dir}")
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

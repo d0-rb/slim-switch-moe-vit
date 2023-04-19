@@ -495,7 +495,7 @@ def get_args_parser():
         "--num-experts", type=int, default=32, help="number of experts for MoE layer"
     )
     parser.add_argument("--gate", type=str, default="naive")
-    parser.add_argument("--load-balance-scale", type=float, default=1e-1)
+    parser.add_argument("--load-balance-scale", type=float, default=0.0)
     parser.add_argument("--validation-size", type=float, default=0.1)
 
     return parser
