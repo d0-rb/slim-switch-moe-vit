@@ -1,5 +1,4 @@
-# This code is based on DeiT:
-# https://github.com/facebookresearch/deit
+# This code is based on DeiT: # https://github.com/facebookresearch/deit
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
 """
@@ -161,7 +160,7 @@ class MetricLogger(object):
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable, print_freq, header=None, verbose=True):
         i = 0
         if not header:
             header = ""
@@ -189,38 +188,40 @@ class MetricLogger(object):
             if i % print_freq == 0 or i == len(iterable) - 1:
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
-                    print(
-                        log_msg.format(
-                            i,
-                            len(iterable),
-                            eta=eta_string,
-                            meters=str(self),
-                            time=str(iter_time),
-                            data=str(data_time),
-                            memory=torch.cuda.max_memory_allocated() / MB,
+                if verbose:
+                    if torch.cuda.is_available():
+                        print(
+                            log_msg.format(
+                                i,
+                                len(iterable),
+                                eta=eta_string,
+                                meters=str(self),
+                                time=str(iter_time),
+                                data=str(data_time),
+                                memory=torch.cuda.max_memory_allocated() / MB,
+                            )
                         )
-                    )
-                else:
-                    print(
-                        log_msg.format(
-                            i,
-                            len(iterable),
-                            eta=eta_string,
-                            meters=str(self),
-                            time=str(iter_time),
-                            data=str(data_time),
+                    else:
+                        print(
+                            log_msg.format(
+                                i,
+                                len(iterable),
+                                eta=eta_string,
+                                meters=str(self),
+                                time=str(iter_time),
+                                data=str(data_time),
+                            )
                         )
-                    )
             i += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print(
-            "{} Total time: {} ({:.4f} s / it)".format(
-                header, total_time_str, total_time / len(iterable)
+        if verbose:
+            print(
+                "{} Total time: {} ({:.4f} s / it)".format(
+                    header, total_time_str, total_time / len(iterable)
+                )
             )
-        )
 
 
 def _load_checkpoint_for_ema(model_ema, checkpoint):
@@ -331,7 +332,7 @@ class TensorboardXTracker:
                 step = int(step * 1000)
             else:
                 step = int(step)
-        
+
         self.writer.add_scalar(var_name, value, step)
 
     @ddp_skip

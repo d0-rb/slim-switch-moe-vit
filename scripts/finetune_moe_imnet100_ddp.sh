@@ -1,25 +1,30 @@
 #!/bin/bash
 read -p 'cuda: ' cuda
-read -p 'gate: ' gate
-read -p 'num-experts: ' num_experts
+#read -p 'gate: ' gate
+#read -p 'num-experts: ' num_experts
 read -p 'lr: ' lr
-read -p 'top-k :' topk
+#read -p 'top-k :' topk
 #read -p 'epochs: ' epochs
-
+num_experts=32
+gate="gshard"
+lr="1e-3"
 num_comma=`echo ${cuda} | tr -cd , | wc -c`
 num_cuda=$((${num_comma} + 1))
 echo $num_cuda
 echo $num_comma
 
+topk=1
+edr=0.5
+edt="cosinesim"
 port=$((9000 + RANDOM % 1000))
 model="moe_tiny_patch16_224"
 start_threshold="0.5"
-dataset="IMNET100"
+dataset="IMNET"
 n=0  # seed
-validation_size=0.1
-epochs=1200
+validation_size=0.001
+epochs=300
 batchsize=1024
-datapath="ImageNet100"
+datapath="./imagenet"
 
 #NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port main.py --model $model --data-set $dataset \
 CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset\
@@ -32,10 +37,10 @@ CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset
 		--num-experts $num_experts \
         --gate $gate \
         --validation-size $validation_size \
-        --top-k $topk \
         --resume \
-		pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_${epochs}/experts_${num_experts}/${n}/best_checkpoint.pth\
-        --output_dir test
-        #--output_dir finetune_v2/${dataset}/${model}/${gate}/lr_${lr}_ep_10_topk_${topk}/experts_${num_experts}/${n}/\
+		pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_${epochs}/experts_${num_experts}/val_${validation_size}/${n}/best_checkpoint.pth\
+        --expert-keep-rate $edr --expert-drop-type $edt --expert-drop-local \
+        --output_dir finetune_imnet/${dataset}/${model}/${gate}/lr_${lr}_ep_10_topk_${topk}/experts_${num_experts}/${n}/\
+        --top-k $topk \
+        #--output_dir finetune_imnet/${dataset}/${model}/${gate}/lr_${lr}_ep_10_ToMe/experts_${num_experts}/${n}/\
  #\
-

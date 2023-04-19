@@ -13,12 +13,12 @@ from timm.utils import get_state_dict  # type: ignore[import]
 
 import utils
 from .base import BasePruning
+from .models.vit_moe import Block
+from .models.vit_moe import CustomizedGshardGate
+from .models.vit_moe import CustomizedMoEMLP
+from .models.vit_moe import CustomizedNaiveGate
 from engine import evaluate
 from engine import train_one_epoch
-from models.vit_moe import Block
-from models.vit_moe import CustomizedGshardGate
-from models.vit_moe import CustomizedMoEMLP
-from models.vit_moe import CustomizedNaiveGate
 
 
 class ExpertDropping(BasePruning):
@@ -39,10 +39,8 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--expert-drop-local",
-            default="false",
-            choices=["false", "true"],
+            action="store_true",
             help="whether to drop locally or not",
-            type=str,
         )
 
     def __init__(
@@ -82,7 +80,7 @@ class ExpertDropping(BasePruning):
         self.n_parameters = sum(
             p.numel() for p in model.parameters() if p.requires_grad
         )
-        self.drop_local = args.expert_drop_local == "true"
+        self.drop_local = args.expert_drop_local
         self.do_finetune = args.epochs > 0
 
     def prune(self, *args, **kwargs):
@@ -103,6 +101,7 @@ class ExpertDropping(BasePruning):
     def drop(self, keep_rate: float | int, model: nn.Module):
         raise NotImplementedError("drop method must be implemented in subclass")
 
+    # this method is no longer needed
     @staticmethod
     def correct_expert_softmax(device, self, input, output):
         top_k_idx = self.top_k_idx.reshape(*output.shape[:2], self.top_k_idx.shape[-1])
@@ -150,9 +149,9 @@ class ExpertDropping(BasePruning):
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedMoEMLP):
                 module.gate_hook = partial(self.store_gate_info, module)
-                module.register_forward_hook(
-                    partial(self.correct_expert_softmax, self.device)
-                )
+                # module.register_forward_hook(
+                # partial(self.correct_expert_softmax, self.device)
+                # )
                 continue
             name_hierarchy = name.split(".")
             if (
@@ -782,6 +781,8 @@ class CosineSimilarityDropping(ExpertDropping):
         expert_similarities[expert_similarities == 0] = float("inf")
 
         print(f"dropped expert similarities:")
+        print(expert_similarities)
+        __import__("pdb").set_trace()
 
         if self.drop_local:
             num_drop_experts_per_moe = th.linspace(
@@ -839,17 +840,21 @@ class CosineSimilarityDropping(ExpertDropping):
             for i in range(self.num_expert):
                 batch_size = fwd_expert_count[i]
                 old_num_forwards = self.num_forwards[i]
-                self.num_forwards[i] += batch_size
+                new_num_forwards = old_num_forwards + batch_size
+
                 expert_in = inp[base_idx : base_idx + batch_size]
                 expert_out = experts_out[base_idx : base_idx + batch_size]
 
                 if batch_size > 0:
+                    mean_cosine_simlarity = F.cosine_similarity(
+                        expert_in, expert_out, dim=1
+                    ).mean()
                     self.expert_similarity[i] = self.expert_similarity[i] * (
-                        old_num_forwards / self.num_forwards[i]
-                    ) + F.cosine_similarity(expert_in, expert_out, dim=1).mean() * (
-                        batch_size / self.num_forwards[i]
-                    )
+                        old_num_forwards / new_num_forwards
+                    ) + mean_cosine_simlarity * (batch_size / new_num_forwards)
 
+                # base_idx += batch_size
+                self.num_forwards[i] = new_num_forwards
                 base_idx += batch_size
 
             return experts_out
@@ -865,6 +870,9 @@ class CosineSimilarityDropping(ExpertDropping):
             base_idx += batch_size
 
         return th.cat(outputs, dim=0)
+
+
+#############
 
 
 # run validation on model and record mean class attn of each expert input, then drop experts which receive least attn input

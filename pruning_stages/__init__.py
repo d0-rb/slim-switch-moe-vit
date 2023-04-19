@@ -7,6 +7,7 @@ from .expert_dropping import NormDropping
 from .expert_dropping import RandomDropping
 from .expert_dropping import VolumeDropping
 from .expert_merging import ExpertMerging
+from .tome import ToMeDrop
 
 # =======
 # from .drop_tokens import DropTokens

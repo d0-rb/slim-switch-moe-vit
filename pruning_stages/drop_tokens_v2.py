@@ -209,7 +209,7 @@ class GNN(nn.Module):
 class DropTokens(BasePruning):
     @staticmethod
     def get_parser(parser: argparse.ArgumentParser):
-        parser.add_argument("--attn-momentum", default=0.75, type=float)
+        parser.add_argument("--attn-momentum", default=0.5, type=float)
         parser.add_argument("--finetune-epochs", default=10, type=int)
         parser.add_argument("--top-k", default=2, type=int)
 
@@ -220,21 +220,24 @@ class DropTokens(BasePruning):
         # self.layers = [6]
         # self.layers = [2, 6, 10]
         self.layers = [3, 6, 9]
-        self.keep_ratios = [[0.7, 0.5, 0.5], [0.7, 0.4, 0.4], [0.7, 0.3, 0.3]]
-        self.grouping_ratios = [
-            [0.5, 0.4, 0.4],
-            [0.5, 0.3, 0.3],
-            [0.5, 0.2, 0.2],
-            [0.5, 0.1, 0.1],
-            [0.5, 0.0, 0.0],
-        ]
-        # self.keep_ratios = [0.9, 0.8, 0.7, 0.6, 0.5]
-        # self.keep_ratios = [0.5]
-        # self.keep_ratios = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]
+        # self.keep_ratios = [[0.7, 0.5, 0.5], [0.7, 0.4, 0.4], [0.7, 0.3, 0.3]]
+        # self.grouping_ratios = [
+        # [0.5, 0.4, 0.4],
+        # [0.5, 0.3, 0.3],
+        # [0.5, 0.2, 0.2],
+        # [0.5, 0.1, 0.1],
+        # [0.5, 0.0, 0.0],
+        # ]
         # self.keep_ratios = [0.7, 0.6, 0.5]
+        # self.keep_ratios = [0.5]
+        # self.keep_ratios = [0.7, 0.6, 0.5, 0.4, 0.3]
+        # self.keep_ratios = [0.7, 0.6]  # 0.5, 0.4, 0.3]
+        self.keep_ratios = [0.9, 0.75, 0.5, 0.25, 0.3]
+        # self.grouping_ratios = [0.5, 0.4, 0.3, 0.2, 0.1]  # 0.25]
+        self.grouping_ratios = [0.5, 0.25]  # , 0.2, 0.1]  # 0.25]
         # self.grouping_ratios = [0.3]
         # self.grouping_ratios = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]  # 0.2, 0.1]
-        # self.grouping_ratios = [0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
+        # self.grouping_ratios = [[0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
         self.init(self.layers)
 
     def set_rate(self, keep_ratios, grouping_ratios):
@@ -263,37 +266,59 @@ class DropTokens(BasePruning):
         cnt = 0
         layer = self.layers
 
-        acc_b4, acc_af, speed = self.eval(self.keep_ratios, self.grouping_ratios)
+        z = [self.keep_ratios] * len(self.grouping_ratios)
 
-        # acc = self.eval(keep_ratios, group_ratios)
-        plot_rows(
-            acc_b4,
-            self.keep_ratios,
+        acc_b4, acc_af, speed = self.eval(self.keep_ratios, self.grouping_ratios)
+        plot_and_save(
+            acc_b4.T,
+            speed.T,
+            z,
             self.grouping_ratios,
-            "group_ratios",
             "accuracy",
-            f"acc_b4_finetune at {self.layers}",
+            "ms/img",
+            "acc_b4 vs speed",
             f"{self.args.output_dir}/acc_b4.pdf",
         )
-        plot_rows(
-            acc_af,
-            self.keep_ratios,
+        plot_and_save(
+            acc_af.T,
+            speed.T,
+            z,
             self.grouping_ratios,
-            "group_ratios",
             "accuracy",
-            f"acc_af_finetune at {self.layers}",
+            "ms/img",
+            "acc_af vs speed",
             f"{self.args.output_dir}/acc_af.pdf",
         )
 
-        plot_rows(
-            speed,
-            self.keep_ratios,
-            self.grouping_ratios,
-            "group_ratios",
-            "ms",
-            "speed at different settings",
-            f"{self.args.output_dir}/speed.pdf",
-        )
+        # acc = self.eval(keep_ratios, group_ratios)
+        # plot_rows(
+        # acc_b4,
+        # self.keep_ratios,
+        # self.grouping_ratios,
+        # "group_ratios",
+        # "accuracy",
+        # f"acc_b4_finetune at {self.layers}",
+        # f"{self.args.output_dir}/acc_b4.pdf",
+        # )
+        # plot_rows(
+        # acc_af,
+        # self.keep_ratios,
+        # self.grouping_ratios,
+        # "group_ratios",
+        # "accuracy",
+        # f"acc_af_finetune at {self.layers}",
+        # f"{self.args.output_dir}/acc_af.pdf",
+        # )
+
+        # plot_rows(
+        # speed,
+        # self.keep_ratios,
+        # self.grouping_ratios,
+        # "group_ratios",
+        # "ms",
+        # "speed at different settings",
+        # f"{self.args.output_dir}/speed.pdf",
+        # )
         th.save(
             {
                 "acc_b4": acc_b4,
@@ -533,3 +558,48 @@ def fast_cosine_similarity(tensor):
     similarity = th.matmul(tensor_normalized, tensor_normalized.transpose(1, 2))
 
     return similarity
+
+
+def plot_and_save(x, y, z, labels, xlabel, ylabel, title, filename):
+    __import__("pdb").set_trace()
+    plt.clf()
+    # Ensure input data is NumPy arrays
+    x = np.array(x)
+    y = np.array(y)
+    z = np.array(z)
+
+    # Get the number of runs
+    num_runs = x.shape[0]
+
+    # Create the line plot for each run
+    for run_idx in range(num_runs):
+        plt.plot(
+            x[run_idx],
+            y[run_idx],
+            marker="o",
+            linestyle="-",
+            label=f"grp:{labels[run_idx]}",
+        )
+
+        # Annotate the points with the z labels
+        for i, label in enumerate(z[run_idx]):
+            plt.annotate(
+                label,
+                (x[run_idx, i], y[run_idx, i]),
+                textcoords="offset points",
+                xytext=(0, 5),
+                ha="center",
+            )
+
+    # Set labels for x and y axes
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+
+    # Set the title of the plot
+    plt.title(title)
+
+    # Save the plot to a file
+    plt.savefig(filename)
+
+    # Close the plot to release memory
+    plt.close()

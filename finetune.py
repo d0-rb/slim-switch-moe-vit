@@ -43,6 +43,7 @@ from pruning_stages import ExpertMerging
 from pruning_stages import MeanShiftDropping
 from pruning_stages import NormDropping
 from pruning_stages import RandomDropping
+from pruning_stages import ToMeDrop
 from pruning_stages import VolumeDropping
 from samplers import RASampler
 from scheduler import CurriculumScheduler
@@ -570,7 +571,7 @@ def main(args):
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
 
     dataset_train, dataset_val = train_val_split(
-        dataset_train, val_size=0.1, seed=args.seed
+        dataset_train, val_size=args.validation_size, seed=args.seed
     )
     dataset_test, _ = build_dataset(is_train=False, args=args)
 
@@ -775,13 +776,6 @@ def main(args):
         args.distillation_tau,
     )
 
-    criterion = DistillationLoss(
-        criterion,
-        teacher_model,
-        args.distillation_type,
-        args.distillation_alpha,
-        args.distillation_tau,
-    )
     if args.resume:
         if args.resume.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -792,37 +786,37 @@ def main(args):
         model_without_ddp.load_state_dict(checkpoint["model"])
 
     # example declaration feel free to chang anything
-    expert_merging = ExpertMerging(
-        model=model_without_ddp,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
-        mixup_fn=mixup_fn,
-        device=device,
-    )
+    # expert_merging = ExpertMerging(
+    # model=model_without_ddp,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # lr_scheduler=lr_scheduler,
+    # model_ema=model_ema,
+    # mixup_fn=mixup_fn,
+    # device=device,
+    # )
 
-    expert_dropping = droptypes[args.expert_drop_type](
-        model=model_without_ddp,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
-        mixup_fn=mixup_fn,
-        device=device,
-    )
+    # expert_dropping = droptypes[args.expert_drop_type](
+    # model=model_without_ddp,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # lr_scheduler=lr_scheduler,
+    # model_ema=model_ema,
+    # mixup_fn=mixup_fn,
+    # device=device,
+    # )
     token_merge = DropTokens(
         model=model,
         trainloader=data_loader_train,
@@ -836,6 +830,19 @@ def main(args):
         device=device,
         mixup_fn=mixup_fn,
     )
+    # tome_merge = ToMeDrop(
+    # model=model,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # device=device,
+    # mixup_fn=mixup_fn,
+    # )
 
     print(f"Start training for {args.epochs} epochs")
 
@@ -843,11 +850,15 @@ def main(args):
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
 
-    expert_merging.main()
-    # expert_dropping.main()
-    # token_merge.main()
+    # expert_dropping.prune()
+    # expert_merging.prune()
+    # token_merge.prune()
 
-    test_stats = evaluate(data_loader_test, model, device)
+    # expert_dropping.main()
+    token_merge.main()
+    # tome_merge.main()
+
+    # test_stats = evaluate(data_loader_test, model, device)
 
     writer.close()
 
@@ -864,5 +875,6 @@ if __name__ == "__main__":
         args.target_threshold_moe = args.target_threshold
 
     if args.output_dir:
+        print(f"output dir: {args.output_dir}")
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

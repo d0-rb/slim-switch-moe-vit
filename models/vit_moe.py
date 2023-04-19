@@ -91,8 +91,16 @@ class CustomizedGshardGate(GShardGate):
 
     @staticmethod
     def apply_expert_mapping(self, inputs, output):
-        self.gate_score = output[1]
-        return self.expert_mapping[output[0]], *output[1::]
+        gate_score = output[1].clone()
+        gate_top_k_idx = self.expert_mapping[output[0]]
+        mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
+        gate_score[mask, 1] = 0
+        gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
+        gate_top_k_idx[mask, 1] = -1
+        if len(output) == 2:
+            return gate_top_k_idx, gate_score
+        else:
+            return gate_top_k_idx, gate_score, output[-1]
 
 
 from .model import deit_tiny_patch16_224
@@ -146,8 +154,8 @@ def _set_expert_mapping(model, mapping_list):
 
 def _make_moe(model, settings, pretrained=False):
     cnt = 0
-    hidden_dim = settings["embed_dim"] * settings["mlp_ratio"]
-    # hidden_dim = (settings["embed_dim"] * settings["mlp_ratio"]) // 2
+    # hidden_dim = settings["embed_dim"] * settings["mlp_ratio"]
+    hidden_dim = (settings["embed_dim"] * settings["mlp_ratio"]) // 2
     for name, module in model.named_modules():
         if isinstance(module, Block):
             if cnt % 2 == 0:
