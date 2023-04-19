@@ -39,6 +39,7 @@ from losses import DistillationLoss
 from pruning_stages import DropTokens
 from pruning_stages import ExpertDropping, RandomDropping, VolumeDropping, NormDropping, MeanShiftDropping, CosineSimilarityDropping, ClassAttnDropping
 from pruning_stages import ExpertMerging
+from pruning_stages import ExpertTomeize
 from samplers import RASampler
 from scheduler import CurriculumScheduler
 from utils import TensorboardXTracker
@@ -527,6 +528,7 @@ def get_args_parser():
     ExpertMerging.get_parser(parser)
     ExpertDropping.get_parser(parser)
     DropTokens.get_parser(parser)
+    ExpertTomeize.get_parser(parser)
 
     return parser
 
@@ -812,6 +814,11 @@ def main(args):
     #     optimizer=optimizer,
     # )
 
+    expert_tomeize = ExpertTomeize(
+        model=model_without_ddp,
+        args=args,
+    )
+
     print(f"Start training for {args.epochs} epochs")
 
     #################################
@@ -823,6 +830,7 @@ def main(args):
     # expert_merging.main()
     expert_dropping.main()
     # token_merge.main()
+    # expert_tomeize.main()
 
     test_stats = evaluate(data_loader_test, model, device)
 
