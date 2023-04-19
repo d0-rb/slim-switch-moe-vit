@@ -14,8 +14,8 @@ echo $num_cuda
 echo $num_comma
 
 topk=1
-edr=0.5
-edt="cosinesim"
+edr=0.5 # expert-drop-ratio
+edt="cosinesim" # expert-drop-type
 port=$((9000 + RANDOM % 1000))
 model="moe_tiny_patch16_224"
 start_threshold="0.5"
@@ -42,5 +42,3 @@ CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset
         --expert-keep-rate $edr --expert-drop-type $edt --expert-drop-local \
         --output_dir finetune_imnet/${dataset}/${model}/${gate}/lr_${lr}_ep_10_topk_${topk}/experts_${num_experts}/${n}/\
         --top-k $topk \
-        #--output_dir finetune_imnet/${dataset}/${model}/${gate}/lr_${lr}_ep_10_ToMe/experts_${num_experts}/${n}/\
- #\

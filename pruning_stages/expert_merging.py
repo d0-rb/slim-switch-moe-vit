@@ -31,10 +31,6 @@ class ExpertMerging(BasePruning):
     def finetune(self, *args, **kwargs):
         pass
 
-        # x = self.htoh4(inp, fwd_expert_count)
-        # x = self.activation(x)
-        # x = self.h4toh(x, fwd_expert_count)
-
     def prune(self, *args, **kwargs):
         print("setting baseline loss")
         baseline_info = evaluate(self.valloader, self.model, self.device)
@@ -81,11 +77,8 @@ class ExpertMerging(BasePruning):
             ] = float("inf")
             mean_stability_mx.fill_diagonal_(float("inf"))
             score, candidates = mean_stability_mx.topk(k=1, dim=-1, largest=False)
-            # score.shape Experts
-            # idx.shpae Experts
             expert_queue = th.argsort(score.squeeze()).flip(dims=(0,)).tolist()
             seen = th.zeros(num_experts).bool()
-            # ^ determine which expert shall merge first
             while expert_queue:
                 expert = expert_queue.pop(0)
                 scr = score[expert]
