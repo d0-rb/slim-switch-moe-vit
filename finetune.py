@@ -40,6 +40,7 @@ from pruning_stages import CosineSimilarityDropping
 from pruning_stages import DropTokens
 from pruning_stages import ExpertDropping
 from pruning_stages import ExpertMerging
+from pruning_stages import HubMeDrop
 from pruning_stages import MeanShiftDropping
 from pruning_stages import NormDropping
 from pruning_stages import RandomDropping
@@ -786,52 +787,38 @@ def main(args):
         model_without_ddp.load_state_dict(checkpoint["model"])
 
     # example declaration feel free to chang anything
-    expert_merging = ExpertMerging(
-        model=model_without_ddp,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
-        mixup_fn=mixup_fn,
-        device=device,
-    )
+    # expert_merging = ExpertMerging(
+    # model=model_without_ddp,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # lr_scheduler=lr_scheduler,
+    # model_ema=model_ema,
+    # mixup_fn=mixup_fn,
+    # device=device,
+    # )
 
-    expert_dropping = droptypes[args.expert_drop_type](
-        model=model_without_ddp,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
-        mixup_fn=mixup_fn,
-        device=device,
-    )
-    token_merge = DropTokens(
-        model=model,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        device=device,
-        mixup_fn=mixup_fn,
-    )
-    # TOKEN MERGE EXPERIMENT
-    # tome_merge = ToMeDrop(
+    # expert_dropping = droptypes[args.expert_drop_type](
+    # model=model_without_ddp,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # lr_scheduler=lr_scheduler,
+    # model_ema=model_ema,
+    # mixup_fn=mixup_fn,
+    # device=device,
+    # )
+    # token_merge = DropTokens(
     # model=model,
     # trainloader=data_loader_train,
     # valloader=data_loader_val,
@@ -844,6 +831,33 @@ def main(args):
     # device=device,
     # mixup_fn=mixup_fn,
     # )
+    # TOKEN MERGE EXPERIMENT
+    # tome_merge = HubMeDrop(
+    # model=model,
+    # trainloader=data_loader_train,
+    # valloader=data_loader_val,
+    # testloader=data_loader_test,
+    # criterion=criterion,
+    # args=args,
+    # writer=writer,
+    # loss_scaler=loss_scaler,
+    # optimizer=optimizer,
+    # device=device,
+    # mixup_fn=mixup_fn,
+    # )
+    tome_merge = HubMeDrop(
+        model=model,
+        trainloader=data_loader_train,
+        valloader=data_loader_val,
+        testloader=data_loader_test,
+        criterion=criterion,
+        args=args,
+        writer=writer,
+        loss_scaler=loss_scaler,
+        optimizer=optimizer,
+        device=device,
+        mixup_fn=mixup_fn,
+    )
 
     print(f"Start training for {args.epochs} epochs")
 
@@ -852,9 +866,9 @@ def main(args):
     # pruning / fine-tuning should be self-contained under that class
 
     # expert_dropping.main()
-    expert_merging.main()
+    # expert_merging.main()
     # token_merge.main()
-    # tome_merge.main()
+    tome_merge.main()
 
     # test_stats = evaluate(data_loader_test, model, device)
 
