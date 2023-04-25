@@ -104,8 +104,12 @@ class CustomizedGshardGate(GShardGate):
 
         # get the sum of unskipped expert softmaxes
         gate_score[first_skipped, 0] = 0
-        gate_score[first_skipped, 1] = 1 - gate_score[first_skipped, 1].detach() + gate_score[first_skipped, 1]
-        gate_score[second_skipped, 0] = 1 - gate_score[second_skipped, 0].detach() + gate_score[second_skipped, 0]
+        gate_score[first_skipped, 1] = (
+            1 - gate_score[first_skipped, 1].detach() + gate_score[first_skipped, 1]
+        )
+        gate_score[second_skipped, 0] = (
+            1 - gate_score[second_skipped, 0].detach() + gate_score[second_skipped, 0]
+        )
         gate_score[second_skipped, 1] = 0
 
         gate_score[mask, 1] = 0
@@ -184,6 +188,27 @@ def _make_moe(model, settings, pretrained=False):
                     drop=settings["drop_rate"],
                     gate=settings["gate"],
                 )
+                # if pretrained:
+                # fc1_w_rep = fc1.weight.unsqueeze(dim=0).repeat(
+                # settings["num_experts"], 1, 1
+                # )
+                # fc1_b_rep = fc1.bias.unsqueeze(dim=0).repeat(
+                # settings["num_experts"], 1, 1
+                # )
+                # fc2_w_rep = fc2.weight.unsqueeze(dim=0).repeat(
+                # settings["num_experts"], 1, 1
+                # )
+                # fc2_b_rep = fc2.bias.unsqueeze(dim=0).repeat(
+                # settings["num_experts"], 1, 1
+                # )
+
+                # print(module.mlp.experts.htoh4.weight.shape, fc1_w_rep.data.shape)
+
+                # module.mlp.experts.htoh4.weight.data.copy_(fc1_w_rep.data)
+                # module.mlp.experts.htoh4.bias.data.copy_(fc1_b_rep.data)
+                # module.mlp.experts.h4toh.weight.data.copy_(fc2_w_rep.data)
+                # module.mlp.experts.h4toh.bias.data.copy_(fc2_b_rep.data)
+
             cnt += 1
     return model
 

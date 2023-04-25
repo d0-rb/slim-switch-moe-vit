@@ -34,11 +34,11 @@ CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset
         --eval-crop-ratio 1.0 --reprob 0.0 --smoothing 0.1 --warmup-epochs 5 --drop 0.0 \
         --seed $n --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \
         --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
-		--num-experts $num_experts \
+	--num-experts $num_experts \
         --gate $gate \
         --validation-size $validation_size \
         --resume \
-		pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_${epochs}/experts_${num_experts}/val_${validation_size}/${n}/best_checkpoint.pth\
-        --expert-keep-rate $edr --expert-drop-type $edt --expert-drop-local \
-        --output_dir finetune_imnet/${dataset}/${model}/${gate}/lr_${lr}_ep_10_topk_${topk}/experts_${num_experts}/${n}/\
-        --top-k $topk \
+	pretrained/${dataset}/${model}/${gate}/lr_1e-3_ep_${epochs}/experts_${num_experts}/val_${validation_size}/${n}/best_checkpoint.pth\
+	--expert-keep-rate $edr --expert-drop-type $edt --expert-drop-local \
+	--top-k $topk \
+    --output_dir finetune_imnet/${dataset}/${model}/${gate}/lr_${lr}_ep_10_hubme/experts_${num_experts}/${n}/\

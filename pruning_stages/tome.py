@@ -31,6 +31,7 @@ class ToMeDrop(BasePruning):
         super().__init__(*args, **kwargs)
 
         self.tome_r = np.arange(1, 16, 1)
+        # self.tome_r = [3]
         self.init()
 
     def main(self):
@@ -81,11 +82,11 @@ class ToMeDrop(BasePruning):
             throughput = self.benchmark()
             results_b4 = evaluate(self.testloader, self.model, self.device)
             print("fine-tune now")
-            self.finetune()
+            # self.finetune()
             print("fine-tunecompleted")
             results_af = evaluate(self.testloader, self.model, self.device)
             acc_b4[i] = results_b4["acc1"]
-            acc_af[i] = results_af["acc1"]
+            # acc_af[i] = results_af["acc1"]
             speed[i] = throughput["step_time"]
 
         os.remove(org_pth)
