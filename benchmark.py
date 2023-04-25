@@ -395,7 +395,7 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
         device="cuda",
         torchscript=False,
         writer=None,
-        keeprate: float | int =1.0,
+        keeprate: float | int = 1.0,
         apply_keeprate=False,
         **kwargs,
     ):
@@ -405,6 +405,11 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
         self.keeprate = keeprate
         self.apply_keeprate = apply_keeprate
         self.writer = writer
+
+        self.model.eval()
+        
+        if not apply_keeprate:
+            return
         
         experts = []
         for i, block in enumerate(self.model.blocks):
@@ -449,8 +454,6 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
 
                     for i, expert_idx in experts_to_drop:
                         self.model.blocks[i].mlp.gate.expert_mapping[expert_idx] = -1
-
-        self.model.eval()
 
     def run(self):
         def _step():

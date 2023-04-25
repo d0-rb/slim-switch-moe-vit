@@ -28,7 +28,7 @@ class ExpertDropping(BasePruning):
             "--expert-keep-rate",
             default=1.0,
             type=float,
-            help="what percentage of experts to keep",
+            help="what percentage of experts to keep. ignored if expert-drop-count > 0",
         )
         parser.add_argument(
             "--expert-drop-count",
@@ -45,7 +45,7 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--expert-drop-local",
-            action="store_true",
+            type=bool,
             help="whether to drop locally or not",
         )
 
@@ -66,7 +66,7 @@ class ExpertDropping(BasePruning):
     ):
         super().__init__(**kwargs)
         self.model: nn.Module = model
-        self.keep_rate: float = args.expert_keep_rate
+        self.keep_rate: float | int = args.expert_keep_rate
         self.device = th.device(args.device)
         self.testLoader = testloader
         self.valLoader = valloader
@@ -91,8 +91,12 @@ class ExpertDropping(BasePruning):
         self.expert_drop_count: int = args.expert_drop_count
 
     def prune(self, *args, **kwargs):
-        if not 0 <= self.keep_rate <= 1:
-            raise ValueError("expert_keep_rate must be in range [0, 1]")
+        if self.expert_drop_count:
+            if self.expert_drop_count < 0:
+                raise ValueError("expert_drop_count, as an int, must be >= 0")
+        else:
+            if not 0 <= self.keep_rate <= 1:
+                raise ValueError("expert_keep_rate, as a float, must be in range [0, 1]")
 
         dropped = self.drop(keep_rate=self.expert_drop_count if self.expert_drop_count else self.keep_rate, model=self.model)
         for name, module in self.model.named_modules():

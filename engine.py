@@ -7,6 +7,7 @@ Train and eval functions used in main.py
 """
 import math
 import sys
+from time import perf_counter
 from typing import Iterable
 from typing import Optional
 
@@ -109,7 +110,9 @@ def evaluate(data_loader, model, device, verbose=True):
 
     # switch to evaluation mode
     model.eval()
+    num_samples = len(data_loader.dataset)
 
+    start_time = perf_counter()
     for images, target in metric_logger.log_every(
         data_loader, 10, header, verbose=verbose
     ):
@@ -127,6 +130,11 @@ def evaluate(data_loader, model, device, verbose=True):
         metric_logger.update(loss=loss.item())
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
+    torch.cuda.synchronize(device=device)
+    elapsed_time = perf_counter() - start_time
+
+    metric_logger.update[f'batch_{data_loader.batch_size}_time'] = elapsed_time / len(data_loader)
+    metric_logger.update[f'samples_per_sec'] = num_samples / elapsed_time
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     pprint(

@@ -803,21 +803,21 @@ def main(args):
     # device=device,
     # )
 
-    # expert_dropping = droptypes[args.expert_drop_type](
-    # model=model_without_ddp,
-    # trainloader=data_loader_train,
-    # valloader=data_loader_val,
-    # testloader=data_loader_test,
-    # criterion=criterion,
-    # args=args,
-    # writer=writer,
-    # loss_scaler=loss_scaler,
-    # optimizer=optimizer,
-    # lr_scheduler=lr_scheduler,
-    # model_ema=model_ema,
-    # mixup_fn=mixup_fn,
-    # device=device,
-    # )
+    expert_dropping = droptypes[args.expert_drop_type](
+    model=model_without_ddp,
+    trainloader=data_loader_train,
+    valloader=data_loader_val,
+    testloader=data_loader_test,
+    criterion=criterion,
+    args=args,
+    writer=writer,
+    loss_scaler=loss_scaler,
+    optimizer=optimizer,
+    lr_scheduler=lr_scheduler,
+    model_ema=model_ema,
+    mixup_fn=mixup_fn,
+    device=device,
+    )
     # token_merge = DropTokens(
     # model=model,
     # trainloader=data_loader_train,
@@ -845,19 +845,19 @@ def main(args):
     # device=device,
     # mixup_fn=mixup_fn,
     # )
-    tome_merge = HubMeDrop(
-        model=model,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        device=device,
-        mixup_fn=mixup_fn,
-    )
+    # tome_merge = HubMeDrop(
+    #     model=model,
+    #     trainloader=data_loader_train,
+    #     valloader=data_loader_val,
+    #     testloader=data_loader_test,
+    #     criterion=criterion,
+    #     args=args,
+    #     writer=writer,
+    #     loss_scaler=loss_scaler,
+    #     optimizer=optimizer,
+    #     device=device,
+    #     mixup_fn=mixup_fn,
+    # )
 
     print(f"Start training for {args.epochs} epochs")
 
@@ -865,12 +865,16 @@ def main(args):
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
 
-    # expert_dropping.main()
+    expert_dropping.main()
     # expert_merging.main()
     # token_merge.main()
-    tome_merge.main()
+    # tome_merge.main()
 
-    # test_stats = evaluate(data_loader_test, model, device)
+    test_stats = evaluate(data_loader_test, model, device)
+
+    keep_rate_or_count = args.expert_keep_rate if args.expert_keep_rate else args.expert_drop_count
+    writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
+    writer.log_scalar(f"batch_{args.batch_size}_time", test_stats[f"batch_{args.batch_size}_time"], keep_rate_or_count)
 
     writer.close()
 
