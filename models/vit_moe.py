@@ -86,6 +86,8 @@ class CustomizedGshardGate(GShardGate):
             self.return_unpruned_topk = True
         else:
             self.return_unpruned_topk = False
+        
+        self.disable_gshard = False
 
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
@@ -124,17 +126,29 @@ class CustomizedGshardGate(GShardGate):
         # if self.expert_mapping.sum() != sum(range(32)):
         #     import pdb; pdb.set_trace()
         
-        topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, self.num_expert)
-        # topk_idx = fmoe_native.prune_gate_by_capacity(topk_idx, capacity,
-        #         num_total_experts, self.world_size)
-        topk_idx[topk_idx == self.num_expert] = -1  # last real expert has idx self.num_expert - 1, dummy expert has idx self.num_expert
+        if self.disable_gshard:
+            topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, self.num_expert)
+            # topk_idx = fmoe_native.prune_gate_by_capacity(topk_idx, capacity,
+            #         num_total_experts, self.world_size)
+            topk_idx[topk_idx == self.num_expert] = -1  # last real expert has idx self.num_expert - 1, dummy expert has idx self.num_expert
 
-        # if self.random_routing:
-        #     rand_routing_prob = th.rand(gate_score.size(0), device=x.device)
-        #     mask = (2 * topk_val[:, 1] < rand_routing_prob)
-        #     topk_idx[:, 1].masked_fill_(mask, -1)
-        
-        # topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, -1)
+            # if self.random_routing:
+            #     rand_routing_prob = th.rand(gate_score.size(0), device=x.device)
+            #     mask = (2 * topk_val[:, 1] < rand_routing_prob)
+            #     topk_idx[:, 1].masked_fill_(mask, -1)
+            
+            # topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, -1)
+        else:
+            topk_idx = fmoe_native.prune_gate_by_capacity(topk_idx, capacity,
+                    num_total_experts, self.world_size)
+
+            if self.random_routing:
+                rand_routing_prob = th.rand(gate_score.size(0), device=x.device)
+                mask = (2 * topk_val[:, 1] < rand_routing_prob)
+                topk_idx[:, 1].masked_fill_(mask, -1)
+            
+            topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, -1)
+
         
         return topk_idx, topk_val
 
