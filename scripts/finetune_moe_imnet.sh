@@ -13,23 +13,23 @@ num_cuda=$((${num_comma} + 1))
 port=$((9000 + RANDOM % 1000))
 model="moe_tiny_patch16_224"
 lr="4e-5"
-dataset="IMNET100"
+dataset="IMNET"
 # n=0  # seed
-validation_size=0.1
-datapath="../ImageNet100"
+datapath="../ImageNet"
 # gate="naive"
 num_experts="32"
 # batchsize="256"
 # epochs="50"
 epochs="0"
-pretrained_epochs="1200"
+pretrained_epochs="300"
 pretrained_lr="1e-3"
+validation_size=0.001 # rougly 1k valid sample
 
 # for gate in "gshard" "naive";
 for gate in "gshard";
 do
     # for keeprate in "0.1" "0.2" "0.3" "0.4" "0.5" "0.6" "0.7" "0.8" "0.9";
-    for keepcount in {103..191..2};
+    for keepcount in {1..191..2};
     do
         for droptype in "cosinesim" "meanshift" "volume";
         # for droptype in "cosinesim";
@@ -52,11 +52,10 @@ do
                         --expert-drop-type $droptype \
                         --expert-drop-local $droplocal \
                         --finetune \
-                        pretrained/${dataset}/${model}/${gate}/lr_${pretrained_lr}_ep_${pretrained_epochs}/experts_${num_experts}/0/best_checkpoint.pth \
+                        pretrained/${dataset}/${model}/${gate}/lr_${pretrained_lr}_ep_${pretrained_epochs}/experts_${num_experts}/val_${validation_size}/0/best_checkpoint.pth \
                         --output_dir \
                         finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/${droptype}/droplocal_${droplocal}/${n}
                         # --expert-keep-rate $keeprate \
-                        # pretrained/${dataset}/${model}/${gate}/lr_${pretrained_lr}_ep_${pretrained_epochs}/experts_${num_experts}/val_${validation_size}/0/best_checkpoint.pth \
             done
         done
     done

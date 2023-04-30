@@ -7,6 +7,7 @@ Train and eval functions used in main.py
 """
 import math
 import sys
+from time import perf_counter
 from typing import Iterable
 from typing import Optional
 
@@ -104,7 +105,11 @@ def pprint(*args, verbose):
 def evaluate(data_loader, model, device, verbose=True):
     criterion = torch.nn.CrossEntropyLoss()
 
+    batch_time_name = f'batch_{data_loader.batch_size}_time'
+
     metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger.add_meter(batch_time_name, utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
+    metric_logger.add_meter('samples_per_sec', utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = "Test:"
 
     # switch to evaluation mode
@@ -118,8 +123,13 @@ def evaluate(data_loader, model, device, verbose=True):
 
         # compute output
         with torch.cuda.amp.autocast():
+            start_time = perf_counter()
+
             output = model(images)
             loss = criterion(output, target)
+            
+            torch.cuda.synchronize(device=device)
+            elapsed_time = perf_counter() - start_time
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
@@ -127,11 +137,14 @@ def evaluate(data_loader, model, device, verbose=True):
         metric_logger.update(loss=loss.item())
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
+        metric_logger.meters[batch_time_name].update(elapsed_time, n=batch_size)
+        metric_logger.meters['samples_per_sec'].update(batch_size / elapsed_time, n=batch_size)
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     pprint(
-        "* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}".format(
-            top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss
+        "* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f} samples_per_sec {samples_per_sec.global_avg:.3f}".format(
+            top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss, samples_per_sec=metric_logger.samples_per_sec,
         ),
         verbose=verbose,
     )

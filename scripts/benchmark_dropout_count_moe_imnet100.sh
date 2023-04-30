@@ -17,8 +17,8 @@ n=0  # seed
 # gate="naive"
 num_experts="32"
 # batchsize="256"
+scan_keeprates="197"
 droptype="random"
-keeprates="0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0"
 epochs="50"
 
 for gate in "gshard" "naive";
@@ -32,11 +32,11 @@ do
                 --num_experts $num_experts \
                 --gate $gate \
                 --num_classes 100 \
-                --keeprates ${keeprates} \
+                --scan-keeprates ${scan_keeprates} \
                 --resume \
                 finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts} \
                 --output_dir \
-                finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/benchmarks \
+                finetuned/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/benchmarks/batchsize_${batchsize}/droplocal_${droplocal} \
                 --expert-drop-local $droplocal
     done
 done

@@ -6,6 +6,7 @@ import typing as typ
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import fmoe_cuda as fmoe_native
 from fmoe import FMoETransformerMLP  # type: ignore[import]
 from fmoe.gates import GShardGate
 from fmoe.gates import NaiveGate  # type: ignore[import]
@@ -78,9 +79,13 @@ class CustomizedGshardGate(GShardGate):
         super().__init__(*args, **kwargs)
 
         self.register_buffer("expert_mapping", th.arange(self.tot_expert))
-        self.register_forward_hook(self.apply_expert_mapping)
+        # self.register_forward_hook(self.apply_expert_mapping)
 
         self.gate_scores = None
+        if 'return_unpruned_topk' in kwargs and kwargs['return_unpruned_topk']:
+            self.return_unpruned_topk = True
+        else:
+            self.return_unpruned_topk = False
 
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
@@ -89,13 +94,62 @@ class CustomizedGshardGate(GShardGate):
         assert th.max(mapping) < self.tot_expert and th.min(mapping) >= -1
         self.expert_mapping.data.copy_(mapping.data)
 
-    @staticmethod
-    def apply_expert_mapping(self, inputs, output):
-        gate_score = output[1].clone()
-        gate_top_k_idx = self.expert_mapping[output[0]]  # (B * T, 2)
+    def forward(self, x):
+        naive_outs = super(GShardGate, self).forward(x, return_all_scores=True)
+        topk_idx, topk_val, gate_score = naive_outs
+        num_total_experts = self.num_expert + 1  # experts plus dummy expert (last one used to prune)
+
+        S = gate_score.shape[0]
+        top1_idx = topk_idx.view((-1, self.top_k))[:, 0]
+        c_e = th.scatter_add(
+                th.zeros(self.tot_expert, device=top1_idx.device),
+                0,
+                top1_idx,
+                th.ones_like(top1_idx, dtype=th.float),
+                ) / S
+        m_e = th.mean(F.softmax(gate_score, dim=1), dim=0)
+        loss = th.mean(c_e * m_e) * (self.num_expert ** 2)
+        self.set_loss(loss)
+
+        cap_rate = self.capacity[0 if self.training else 1]
+        capacity = math.ceil(cap_rate * x.shape[0])
+        capacity = capacity * self.top_k // (self.world_size * self.num_expert)
+        capacity = th.ones(num_total_experts * self.world_size,
+                dtype=th.int32, device=topk_idx.device) * capacity
+        capacity[-1] = 0  # dummy expert has capacity 0
+
+        if self.return_unpruned_topk:
+            self._topk_idx = topk_idx.clone()
+        
+        # if self.expert_mapping.sum() != sum(range(32)):
+        #     import pdb; pdb.set_trace()
+        
+        topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, self.num_expert)
+        # topk_idx = fmoe_native.prune_gate_by_capacity(topk_idx, capacity,
+        #         num_total_experts, self.world_size)
+        topk_idx[topk_idx == self.num_expert] = -1  # last real expert has idx self.num_expert - 1, dummy expert has idx self.num_expert
+
+        # if self.random_routing:
+        #     rand_routing_prob = th.rand(gate_score.size(0), device=x.device)
+        #     mask = (2 * topk_val[:, 1] < rand_routing_prob)
+        #     topk_idx[:, 1].masked_fill_(mask, -1)
+        
+        # topk_idx, topk_val = self.apply_expert_mapping(topk_val, topk_idx, -1)
+        
+        return topk_idx, topk_val
+
+    # @staticmethod
+    def apply_expert_mapping(self, topk_score, topk_idx, placeholder_idx):
+        gate_score = topk_score.clone()
+
+        modified_expert_mapping = self.expert_mapping.clone()  # expert mapping that sends skipped experts to placeholder_idx instead of -1
+        modified_expert_mapping[modified_expert_mapping == -1] = placeholder_idx
+        # modified_expert_mapping = th.cat((modified_expert_mapping, th.tensor([-1], device=modified_expert_mapping.device)), dim=-1)
+
+        gate_top_k_idx = modified_expert_mapping[topk_idx]  # (B * T, 2)
         mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
 
-        skipped_experts = gate_top_k_idx == -1
+        skipped_experts = gate_top_k_idx == placeholder_idx
         # double_skipped = skipped_experts.sum(dim=1) == 2
         # first_skipped = skipped_experts[:, 0] * ~double_skipped
         first_skipped = skipped_experts[:, 0]
@@ -114,11 +168,9 @@ class CustomizedGshardGate(GShardGate):
 
         gate_score[mask, 1] = 0
         gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
-        gate_top_k_idx[mask, 1] = -1
-        if len(output) == 2:
-            return gate_top_k_idx, gate_score
-        else:
-            return gate_top_k_idx, gate_score, output[-1]
+        gate_top_k_idx[mask, 1] = placeholder_idx
+        
+        return gate_top_k_idx, gate_score
 
 
 from .model import deit_tiny_patch16_224
