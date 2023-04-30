@@ -17,6 +17,8 @@ from .models.vit_moe import Block
 from .models.vit_moe import CustomizedGshardGate
 from .models.vit_moe import CustomizedMoEMLP
 from .models.vit_moe import CustomizedNaiveGate
+from .benchmark import InferenceBenchmarkRunner
+from .hubme import plot_and_save
 from engine import evaluate
 from engine import train_one_epoch
 
@@ -97,6 +99,22 @@ class ExpertDropping(BasePruning):
         self.do_finetune = args.epochs > 0
         self.expert_keep_count: int = args.expert_keep_count
         self.softmax_rescale: bool = args.softmax_rescale
+
+    def benchmark(self, loader):
+        input_size = self.args.input_size
+        self.args.input_size = (3, self.args.input_size, self.args.input_size)
+        bench = InferenceBenchmarkRunner(
+            model_name=self.args.model,
+            model_object=self.model,
+            data_loader=loader,
+            **vars(self.args),
+        )
+        results = bench.run()
+        self.args.input_size = input_size
+        print(
+            f"{results['samples_per_sec']:.2f} samples/sec, {results['step_time']:.2f} ms/step"
+        )
+        return results
 
     def prune(self, *args, **kwargs):
         if self.expert_keep_count:
@@ -270,6 +288,7 @@ class ExpertDropping(BasePruning):
                     f.write(json.dumps(log_stats) + "\n")
         
         if not self.do_finetune:
+            throughput = self.benchmark(self.testLoader)
             test_stats = evaluate(self.testLoader, self.model, self.device)
 
             print(
@@ -278,8 +297,10 @@ class ExpertDropping(BasePruning):
 
             keep_rate_or_count = self.expert_keep_count if self.expert_keep_count else self.expert_keep_rate
             self.writer.log_scalar("test/acc1", test_stats["acc1"], keep_rate_or_count)
-            self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
-            self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", test_stats[f"batch_{self.testLoader.batch_size}_time"], keep_rate_or_count)
+            # self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
+            self.writer.log_scalar("samples_per_sec", throughput['samples_per_sec'], keep_rate_or_count)
+            # self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", test_stats[f"batch_{self.testLoader.batch_size}_time"], keep_rate_or_count)
+            self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", throughput['step_time'], keep_rate_or_count)
 
             max_accuracy = test_stats["acc1"]
 
