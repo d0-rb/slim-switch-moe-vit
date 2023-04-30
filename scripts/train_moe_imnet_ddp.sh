@@ -30,8 +30,7 @@ NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cud
     --seed $n --opt adamw --warmup-lr 1e-6 --mixup .8 --drop-path 0.0 --cutmix 1.0 \
     --no-repeated-aug --aa rand-m9-mstd0.5-inc1 \
 	--num-experts $num_experts \
-    --gate $gate --pretrained \
+    --gate $gate --pretrained --load-balance-scale 0.1\
 	--validation-size $validation_size \
     --output_dir \
-    pretrained/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/${n}\
-    --unscale-lr
+    pretrained_gshard/${dataset}/${model}/${gate}/lr_${lr}_ep_${epochs}/experts_${num_experts}/${n}\
