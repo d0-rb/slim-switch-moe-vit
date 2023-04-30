@@ -29,7 +29,7 @@ pretrained_lr="1e-3"
 for gate in "gshard";
 do
     # for keeprate in "0.1" "0.2" "0.3" "0.4" "0.5" "0.6" "0.7" "0.8" "0.9";
-    for keepcount in {103..191..2};
+    for keepcount in {1..191..2};
     do
         for droptype in "cosinesim" "meanshift" "volume";
         # for droptype in "cosinesim";
