@@ -32,10 +32,10 @@ do
     for keepcount in {1..191..2};
     do
         for droptype in "cosinesim" "meanshift" "volume";
-        # for droptype in "cosinesim";
+        # for droptype in "random";
         do
-            for droplocal in "false" "true";
-            # for droplocal in "false";
+            # for droplocal in "false" "true";
+            for droplocal in "false";
             do
                 # CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset \
                 NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port finetune.py --model $model --data-set $dataset \

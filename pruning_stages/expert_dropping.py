@@ -17,6 +17,8 @@ from .models.vit_moe import Block
 from .models.vit_moe import CustomizedGshardGate
 from .models.vit_moe import CustomizedMoEMLP
 from .models.vit_moe import CustomizedNaiveGate
+from .benchmark import InferenceBenchmarkRunner
+from .hubme import plot_and_save
 from engine import evaluate
 from engine import train_one_epoch
 
@@ -45,8 +47,8 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--expert-drop-local",
-            default=False,
-            type=bool,
+            default='false',
+            type=str,
             help="whether to drop locally or not",
         )
         parser.add_argument(
@@ -93,10 +95,26 @@ class ExpertDropping(BasePruning):
         self.n_parameters = sum(
             p.numel() for p in model.parameters() if p.requires_grad
         )
-        self.drop_local = args.expert_drop_local
+        self.drop_local = args.expert_drop_local.lower() == 'true'
         self.do_finetune = args.epochs > 0
         self.expert_keep_count: int = args.expert_keep_count
         self.softmax_rescale: bool = args.softmax_rescale
+
+    def benchmark(self, loader):
+        input_size = self.args.input_size
+        self.args.input_size = (3, self.args.input_size, self.args.input_size)
+        bench = InferenceBenchmarkRunner(
+            model_name=self.args.model,
+            model_object=self.model,
+            data_loader=loader,
+            **vars(self.args),
+        )
+        results = bench.run()
+        self.args.input_size = input_size
+        print(
+            f"{results['samples_per_sec']:.2f} samples/sec, {results['step_time']:.2f} ms/step"
+        )
+        return results
 
     def prune(self, *args, **kwargs):
         if self.expert_keep_count:
@@ -270,6 +288,7 @@ class ExpertDropping(BasePruning):
                     f.write(json.dumps(log_stats) + "\n")
         
         if not self.do_finetune:
+            throughput = self.benchmark(self.testLoader)
             test_stats = evaluate(self.testLoader, self.model, self.device)
 
             print(
@@ -278,8 +297,10 @@ class ExpertDropping(BasePruning):
 
             keep_rate_or_count = self.expert_keep_count if self.expert_keep_count else self.expert_keep_rate
             self.writer.log_scalar("test/acc1", test_stats["acc1"], keep_rate_or_count)
-            self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
-            self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", test_stats[f"batch_{self.testLoader.batch_size}_time"], keep_rate_or_count)
+            # self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
+            self.writer.log_scalar("samples_per_sec", throughput['samples_per_sec'], keep_rate_or_count)
+            # self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", test_stats[f"batch_{self.testLoader.batch_size}_time"], keep_rate_or_count)
+            self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", throughput['step_time'], keep_rate_or_count)
 
             max_accuracy = test_stats["acc1"]
 
@@ -306,14 +327,13 @@ class ExpertDropping(BasePruning):
 # randomly drop experts equally among all gates
 class RandomDropping(ExpertDropping):
     def drop(self, keep_rate: float | int, model: nn.Module) -> None:
-        total_experts = 0
         gates = [
             module
             for module in model.modules()
             if isinstance(module, CustomizedNaiveGate)
             or isinstance(module, CustomizedGshardGate)
         ]
-        total_experts = sum(gate.tot_expert for gate in gates)
+        self.total_experts = sum(gate.tot_expert for gate in gates)
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
         else:
@@ -334,7 +354,7 @@ class RandomDropping(ExpertDropping):
 
                 valid_expert_mask = (
                     gate.expert_mapping != -1
-                )  # ensure we only drop experts that have not already been dropped
+                ).float()  # ensure we only drop experts that have not already been dropped
 
                 dropped_experts: th.Tensor = th.multinomial(
                     valid_expert_mask, num_drop, replacement=False
@@ -364,7 +384,7 @@ class RandomDropping(ExpertDropping):
             for gate, new_mapping in new_gate_mappings.items():
                 gate.set_expert_mapping(mapping=new_mapping)
 
-        print(f"dropped {num_dropped} experts out of {total_experts}")
+        print(f"dropped {num_dropped} experts out of {self.total_experts}")
 
 
 # run validation on model and record volume of each expert, then drop least-visited experts
