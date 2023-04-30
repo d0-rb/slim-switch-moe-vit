@@ -3,7 +3,7 @@ read -p 'cuda: ' cuda
 read -p 'data path: ' datapath
 read -p 'batch size: ' batchsize
 #read -p 'gate: ' gate
-#read -p 'num-experts: ' num_experts
+read -p 'num-experts: ' num_experts
 read -p 'epochs: ' epochs
 read -p 'model type: ' m_type
 
@@ -17,7 +17,7 @@ model="moe_${m_type}_patch16_224"
 lr="1e-3"
 start_threshold="0.5"
 dataset="IMNET"
-num_experts=32
+# num_experts=32
 n=0  # seed
 gate='gshard'
 validation_size=0.001 # rougly 1k valid sample
