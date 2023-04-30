@@ -264,7 +264,12 @@ parser.add_argument(
     "--output_dir", default="", help="path where to save, empty for no saving", type=str
 )
 parser.add_argument("--keeprates", default="", help="keep rates", type=str)
-parser.add_argument("--scan-keeprates", default=0, help="scan through all keep rates up to given number", type=int)
+parser.add_argument(
+    "--scan-keeprates",
+    default=0,
+    help="scan through all keep rates up to given number",
+    type=int,
+)
 parser.add_argument("--seed", default=0, help="seed", type=int)
 parser.add_argument(
     "--expert-drop-local",
@@ -395,6 +400,7 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
         device="cuda",
         torchscript=False,
         writer=None,
+        loader=None,
         keeprate: float | int = 1.0,
         apply_keeprate=False,
         **kwargs,
@@ -403,52 +409,61 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
             model_name=model_name, device=device, torchscript=torchscript, **kwargs
         )
         self.keeprate = keeprate
+        self.loader = loader
         self.apply_keeprate = apply_keeprate
         self.writer = writer
 
         self.model.eval()
-        
+
         if not apply_keeprate:
             return
-        
+
         experts = []
         for i, block in enumerate(self.model.blocks):
             if isinstance(block.mlp, CustomizedMoEMLP):
-                layer_experts = [(i, expert_idx) for expert_idx in (block.mlp.gate.expert_mapping != -1).nonzero().flatten().tolist()]
-                if self.apply_keeprate == 'global':
+                layer_experts = [
+                    (i, expert_idx)
+                    for expert_idx in (block.mlp.gate.expert_mapping != -1)
+                    .nonzero()
+                    .flatten()
+                    .tolist()
+                ]
+                if self.apply_keeprate == "global":
                     experts.extend(layer_experts)
-                elif self.apply_keeprate == 'local':
+                elif self.apply_keeprate == "local":
                     experts.append(layer_experts)
-        
-        if self.apply_keeprate == 'global':
+
+        if self.apply_keeprate == "global":
             num_experts = len(experts)
-        elif self.apply_keeprate == 'local':
+        elif self.apply_keeprate == "local":
             num_experts = [len(layer_experts) for layer_experts in experts]
             num_experts = sum(num_experts)
-        
+
         if isinstance(self.keeprate, float):
             drop_count = int(num_experts * (1 - self.keeprate))
         elif isinstance(self.keeprate, int):
             drop_count = num_experts - self.keeprate
 
         if drop_count > 0:
-            if self.apply_keeprate == 'global':
+            if self.apply_keeprate == "global":
                 random.shuffle(experts)
                 experts_to_drop = experts[drop_count:]
 
                 for i, expert_idx in experts_to_drop:
                     self.model.blocks[i].mlp.gate.expert_mapping[expert_idx] = -1
-            elif self.apply_keeprate == 'local':
+            elif self.apply_keeprate == "local":
                 num_drop_experts_per_gate = th.linspace(
                     0, drop_count, len(experts) + 1
                 ).int()[1:]
                 num_drop_experts_per_gate[1:] -= num_drop_experts_per_gate[:-1].clone()
 
                 for i, layer_experts in enumerate(experts):
-                    num_drop: int = num_drop_experts_per_gate[i].item()  # number of experts to drop
+                    num_drop: int = num_drop_experts_per_gate[
+                        i
+                    ].item()  # number of experts to drop
                     if num_drop == 0:
                         continue
-                    
+
                     random.shuffle(layer_experts)
                     experts_to_drop = layer_experts[:num_drop]  # experts to drop
 
@@ -456,10 +471,10 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
                         self.model.blocks[i].mlp.gate.expert_mapping[expert_idx] = -1
 
     def run(self):
-        def _step():
+        def _step(data):
             t_step_start = self.time_fn()
             with self.amp_autocast():
-                output = self.model(self.example_inputs)
+                output = self.model(data)
             t_step_end = self.time_fn(True)
             return t_step_end - t_step_start
 
@@ -472,22 +487,36 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
             self._init_input()
 
             for _ in range(self.num_warm_iter):
-                _step()
+                _step(self.example_inputs)
 
             total_step = 0.0
             num_samples = 0
-            t_run_start = self.time_fn()
-            for i in range(self.num_bench_iter):
-                delta_fwd = _step()
-                total_step += delta_fwd
-                num_samples += self.batch_size
-                num_steps = i + 1
-                if num_steps % self.log_freq == 0:
-                    _logger.info(
-                        f"Infer [{num_steps}/{self.num_bench_iter}]."
-                        f" {num_samples / total_step:0.2f} samples/sec."
-                        f" {1000 * total_step / num_steps:0.3f} ms/step."
-                    )
+            if self.loader is None:
+                t_run_start = self.time_fn()
+                for i in range(self.num_bench_iter):
+                    delta_fwd = _step(self.example_inputs)
+                    total_step += delta_fwd
+                    num_samples += self.batch_size
+                    num_steps = i + 1
+                    if num_steps % self.log_freq == 0:
+                        _logger.info(
+                            f"Infer [{num_steps}/{self.num_bench_iter}]."
+                            f" {num_samples / total_step:0.2f} samples/sec."
+                            f" {1000 * total_step / num_steps:0.3f} ms/step."
+                        )
+            else:
+                for i, data in enumerate(self.loader):  # range(self.num_bench_iter):
+                    delta_fwd = _step(data)
+                    total_step += delta_fwd()
+                    num_samples += self.batch_size
+                    num_steps = i + 1
+                    if num_steps % self.log_freq == 0:
+                        _logger.info(
+                            f"Infer [{num_steps}/{self.num_bench_iter}]."
+                            f" {num_samples / total_step:0.2f} samples/sec."
+                            f" {1000 * total_step / num_steps:0.3f} ms/step."
+                        )
+
             t_run_end = self.time_fn(True)
             t_run_elapsed = t_run_end - t_run_start
 
@@ -727,7 +756,7 @@ def main():
     if args.output_dir:
         args.writer = TensorboardXTracker(output_dir)
     output_dir = Path(args.output_dir)
-    
+
     resume_root = args.resume
 
     if args.scan_keeprates:
@@ -737,12 +766,12 @@ def main():
         )
         for i in range(args.scan_keeprates):
             args.keeprate = i
-            args.apply_keeprate = 'local' if args.expert_drop_local else 'global'
-            print('keep count:', args.keeprate)
+            args.apply_keeprate = "local" if args.expert_drop_local else "global"
+            print("keep count:", args.keeprate)
             benchmark(args)
 
         return
-    
+
     keeprates = [float(keeprate) for keeprate in args.keeprates.split(",")]
 
     for keeprate in keeprates:

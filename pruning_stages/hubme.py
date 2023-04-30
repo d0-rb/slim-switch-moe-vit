@@ -7,11 +7,13 @@ import typing as typ
 from typing import Callable
 from typing import Tuple
 
+import fmoe_cuda as fmoe_native
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch as th
 import torch.nn as nn
+import torch.nn.functional as F
 from tome.merge import bipartite_soft_matching
 from tome.merge import merge_source
 from tome.merge import merge_wavg
@@ -25,6 +27,8 @@ from .engine import evaluate
 from .engine import train_one_epoch
 from .models.vision_transformer import Attention
 from .models.vision_transformer import Block
+from .models.vit_moe import CustomizedGshardGate
+from .models.vit_moe import CustomizedMoEMLP
 
 # from tome.patch.timm import make_tome_class
 
@@ -40,9 +44,12 @@ class HubMeDrop(BasePruning):
         super().__init__(*args, **kwargs)
 
         self.tome_r = np.arange(0, 25, 8)
-        self.tome_k = np.arange(28, 99, 14)
+        # self.tome_k = np.arange(28, 99, 14)
+        self.tome_k = [0]
+        self.tome_p = np.linspace(0.9, 1.0, 10)
+        # self.tome_p = np.linspace(0.8, 1.0, 10)
         # tome
-        self.tome_k = np.append(self.tome_k, 0)
+        self.tome_p = np.append(self.tome_p, 0)
         # self.tome_r = np.arange(0, 24, 12)
         # self.tome_k = np.arange(28, 98, 7)
         # self.tome_r = [16]
@@ -52,12 +59,12 @@ class HubMeDrop(BasePruning):
     def main(self):
         # evaluate(self.testloader, self.model, self.device)
 
-        acc_b4, acc_af, speed = self.eval(self.tome_r, self.tome_k)
+        acc_b4, acc_af, speed = self.eval(self.tome_r, self.tome_p)
         plot_and_save(
             acc_b4,
             speed,
             self.tome_r,
-            self.tome_k,
+            self.tome_p,
             "accuracy",
             "ms/step",
             "acc_b4 vs. speed",
@@ -82,21 +89,23 @@ class HubMeDrop(BasePruning):
                 else:
                     param.requires_grad = False
 
-    def eval(self, tome_r: typ.List[int], tome_k):
-        acc_b4 = th.zeros(len(tome_k), len(tome_r))
-        acc_af = th.zeros(len(tome_k), len(tome_r))
-        speed = th.zeros(len(tome_k), len(tome_r))
+    def eval(self, tome_r: typ.List[int], tome_p):
+        acc_b4 = th.zeros(len(tome_p), len(tome_r))
+        acc_af = th.zeros(len(tome_p), len(tome_r))
+        speed = th.zeros(len(tome_p), len(tome_r))
 
         # org_pth = os.path.join(self.args.output_dir, "orig.pth")
         # th.save(self.model.state_dict(), org_pth)
-        for j, k in enumerate(tome_k):
-            self.model.k = k
+        self.model.k = 0
+        for j, p in enumerate(tome_p):
+            # __import__("pdb").set_trace()
+            self.model.p = p
             for i, r in enumerate(tome_r):
                 # self.model.load_state_dict(th.load(org_pth))
                 self.model.r = r
                 self.optimizer.__init__(self.model.parameters(), self.args.lr)
-                print(f"##################### {k=} | {r=} ##################")
-                throughput = self.benchmark()
+                print(f"##################### {p=} | {r=} ##################")
+                throughput = self.benchmark(self.testloader)
                 results_b4 = evaluate(self.testloader, self.model, self.device)
                 print("fine-tune now")
                 # self.finetune()
@@ -104,16 +113,17 @@ class HubMeDrop(BasePruning):
                 # results_af = evaluate(self.testloader, self.model, self.device)
                 acc_b4[j, i] = results_b4["acc1"]
                 # acc_af[i] = results_af["acc1"]
-                speed[j, i] = throughput["step_time"]
+                # speed[j, i] = throughput["step_time"]
 
         # os.remove(org_pth)
 
         return acc_b4, acc_af, speed
 
-    def benchmark(self):
+    def benchmark(self, loader):
         bench = InferenceBenchmarkRunner(
             model_name=self.args.model,
             model_object=self.model,
+            data_loader=loader,
             **vars(self.args),
         )
         results = bench.run()
@@ -242,9 +252,11 @@ def apply_patch(model, trace_source: bool = False, prop_attn: bool = True):
     model.__class__ = ToMeVisionTransformer
     model.r = 0
     model.k = 0
+    model.p = 0
     model._tome_info = {
         "r": model.r,
         "k": model.k,
+        "p": model.p,
         "size": None,
         "source": None,
         "trace_source": trace_source,
@@ -260,6 +272,9 @@ def apply_patch(model, trace_source: bool = False, prop_attn: bool = True):
         if isinstance(module, Block):
             module.__class__ = HubMeBlock
             module._tome_info = model._tome_info
+            if isinstance(module.mlp, CustomizedMoEMLP):
+                module.mlp.gate.__class__ = GshardGateDropout
+                module.mlp.gate._tome_info = module._tome_info
         elif isinstance(module, Attention):
             module.__class__ = HubMeAttention
 
@@ -477,6 +492,81 @@ class HubMeAttention(ToMeAttention):
         return x, k.mean(1)
 
 
+class GshardGateDropout(CustomizedGshardGate):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def naive_out(self, inp, return_all_scores=False):
+        gate = self.gate(inp)
+        gate_top_k_val, gate_top_k_idx = torch.topk(
+            gate, k=self.top_k, dim=-1, largest=True, sorted=False
+        )  # [.. x top_k]
+        gate_top_k_val = gate_top_k_val.view(-1, self.top_k)
+
+        # (BxL) x 1 x top_k
+        gate_score = F.softmax(gate_top_k_val, dim=-1)
+
+        if return_all_scores:
+            return gate_top_k_idx, gate_score, gate
+        return gate_top_k_idx, gate_score
+
+    def forward(self, x):
+
+        naive_outs = self.naive_out(x, True)
+        topk_idx, topk_val, gate_score = naive_outs
+
+        S = gate_score.shape[0]
+        top1_idx = topk_idx.view((-1, self.top_k))[:, 0]
+        c_e = (
+            torch.scatter_add(
+                torch.zeros(self.tot_expert, device=top1_idx.device),
+                0,
+                top1_idx,
+                torch.ones_like(top1_idx, dtype=torch.float),
+            )
+            / S
+        )
+        m_e = torch.mean(F.softmax(gate_score, dim=1), dim=0)
+        loss = torch.mean(c_e * m_e) * (self.num_expert**2)
+        self.set_loss(loss)
+
+        cap_rate = self.capacity[0 if self.training else 1]
+        capacity = math.ceil(cap_rate * x.shape[0])
+        capacity = capacity * self.top_k // (self.world_size * self.num_expert)
+        capacity = (
+            torch.ones(
+                self.num_expert * self.world_size,
+                dtype=torch.int32,
+                device=topk_idx.device,
+            )
+            * capacity
+        )
+        topk_idx = fmoe_native.prune_gate_by_capacity(
+            topk_idx, capacity, self.num_expert, self.world_size
+        )
+
+        if self.random_routing:
+            rand_routing_prob = torch.rand(gate_score.size(0), device=x.device)
+            mask = 2 * topk_val[:, 1] < rand_routing_prob
+            topk_idx[:, 1].masked_fill_(mask, -1)
+
+        p = self._tome_info["p"].pop()
+        topk_idx = self.token_drop(gate_score, topk_idx, p)
+        return topk_idx, topk_val
+
+    def token_drop(self, gate_score, topk_idx, p):
+        if p == 0:
+            return topk_idx
+
+        ks_score = ~kolmogorov_smirnov(
+            gate_score, th.rand_like(gate_score), alpha=th.as_tensor([p])
+        )[0].squeeze()
+        topk_idx[ks_score, 0] = -1
+        topk_idx[ks_score, 1] = -1
+
+        return topk_idx
+
+
 def make_tome_class(transformer_class):
     class HubMeVisionTransformer(transformer_class):
         """
@@ -487,9 +577,60 @@ def make_tome_class(transformer_class):
         def forward(self, *args, **kwdargs) -> torch.Tensor:
             self._tome_info["r"] = parse_r(len(self.blocks), self.r)
             self._tome_info["k"] = parse_r(len(self.blocks), self.k)
+            self._tome_info["p"] = [self.p] * len(self.blocks)
             self._tome_info["size"] = None
             self._tome_info["source"] = None
 
             return super().forward(*args, **kwdargs)
 
     return HubMeVisionTransformer
+
+
+def alpha_D(D, n1: int, n2: int):
+    return 2 * (-D.square() * 2 * n1 / (1 + n1 / n2)).exp()
+
+
+@torch.jit.script
+def kolmogorov_smirnov(
+    points1, points2, alpha=torch.as_tensor([0.05, 0.01, 0.001, 0.0001])
+):
+    """
+    Kolmogorov-Smirnov test for empirical similarity of probability distributions.
+
+    Warning: we assume that none of the elements of points1 coincide with points2.
+    The test may gave false negatives if there are coincidences, however the effect
+    is small.
+    Parameters
+    ----------
+    points1 : (..., n1) torch.Tensor
+        Batched set of samples from the first distribution
+    points2 : (..., n2) torch.Tensor
+        Batched set of samples from the second distribution
+    alpha : torch.Tensor
+        Confidence intervals we wish to test. The default is torch.as_tensor([0.05, 0.01, 0.001, 0.0001]).
+    Returns
+    -------
+    Tuple of (torch.Tensor, torch.Tensor)
+        The test result at each alpha, and the estimated p-values.
+    """
+    device = points1.device
+    n1 = points1.shape[-1]
+    n2 = points2.shape[-1]
+    # Confidence level
+    c_ks = torch.sqrt(-0.5 * (alpha / 2).log())
+    sup_conf = c_ks * torch.as_tensor((n1 + n2) / (n1 * n2)).sqrt()
+    sup_conf = sup_conf.reshape((1, alpha.shape[0]))
+    sup_conf = sup_conf.to(device)
+
+    comb = torch.concatenate((points1, points2), dim=-1)
+
+    comb_argsort = comb.argsort(dim=-1)
+
+    pdf1 = torch.where(comb_argsort < n1, 1 / n1, 0)
+    pdf2 = torch.where(comb_argsort >= n1, 1 / n2, 0)
+
+    cdf1 = pdf1.cumsum(dim=-1)
+    cdf2 = pdf2.cumsum(dim=-1)
+
+    sup, _ = (cdf1 - cdf2).abs().max(dim=-1, keepdim=True)
+    return sup > sup_conf, alpha_D(sup, n1, n2)
