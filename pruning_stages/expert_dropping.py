@@ -28,13 +28,13 @@ class ExpertDropping(BasePruning):
             "--expert-keep-rate",
             default=1.0,
             type=float,
-            help="what percentage of experts to keep. ignored if expert-drop-count > 0",
+            help="what percentage of experts to keep. ignored if expert-keep-count > 0",
         )
         parser.add_argument(
-            "--expert-drop-count",
+            "--expert-keep-count",
             default=0,
             type=int,
-            help="how many experts to drop. if 0, ignore and use keep rate instead",
+            help="how many experts to keep. if 0, ignore and use keep rate instead",
         )
         parser.add_argument(
             "--expert-drop-type",
@@ -45,8 +45,15 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--expert-drop-local",
+            default=False,
             type=bool,
             help="whether to drop locally or not",
+        )
+        parser.add_argument(
+            "--softmax-rescale",
+            default=False,
+            type=bool,
+            help="whether to do softmax rescaling or not",
         )
 
     def __init__(
@@ -88,17 +95,18 @@ class ExpertDropping(BasePruning):
         )
         self.drop_local = args.expert_drop_local
         self.do_finetune = args.epochs > 0
-        self.expert_drop_count: int = args.expert_drop_count
+        self.expert_keep_count: int = args.expert_keep_count
+        self.softmax_rescale: bool = args.softmax_rescale
 
     def prune(self, *args, **kwargs):
-        if self.expert_drop_count:
-            if self.expert_drop_count < 0:
-                raise ValueError("expert_drop_count, as an int, must be >= 0")
+        if self.expert_keep_count:
+            if self.expert_keep_count < 0:
+                raise ValueError("expert_keep_count, as an int, must be >= 0")
         else:
             if not 0 <= self.keep_rate <= 1:
                 raise ValueError("expert_keep_rate, as a float, must be in range [0, 1]")
 
-        dropped = self.drop(keep_rate=self.expert_drop_count if self.expert_drop_count else self.keep_rate, model=self.model)
+        dropped = self.drop(keep_rate=self.expert_keep_count if self.expert_keep_count else self.keep_rate, model=self.model)
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedNaiveGate) or isinstance(
                 module, CustomizedGshardGate
@@ -148,9 +156,6 @@ class ExpertDropping(BasePruning):
         self.gate_score = gate_score
 
     def finetune(self, *args, **kwargs):
-        if not self.do_finetune:
-            return
-
         # remove all params from optimizer except for moe
         self.optimizer.param_groups.clear()  # optim.param_group = []
         self.optimizer.state.clear()  # optim.state = defaultdict(dict)
@@ -204,6 +209,7 @@ class ExpertDropping(BasePruning):
 
             if self.output_dir:
                 checkpoint_paths = [self.output_dir / "checkpoint.pth"]
+                print(f"Saving checkpoint to {checkpoint_paths}")
                 for checkpoint_path in checkpoint_paths:
                     utils.save_on_master(
                         {
@@ -256,6 +262,33 @@ class ExpertDropping(BasePruning):
                 **{f"val_{k}": v for k, v in val_stats.items()},
                 **{f"test_{k}": v for k, v in test_stats.items()},
                 "epoch": epoch,
+                "n_parameters": self.n_parameters,
+            }
+
+            if self.output_dir and utils.is_main_process():
+                with (self.output_dir / "log.txt").open("a") as f:
+                    f.write(json.dumps(log_stats) + "\n")
+        
+        if not self.do_finetune:
+            test_stats = evaluate(self.testLoader, self.model, self.device)
+
+            print(
+                f"Accuracy of the network on the {len(self.testLoader.dataset)} test images: {test_stats['acc1']:.1f}%"
+            )
+
+            keep_rate_or_count = self.expert_keep_count if self.expert_keep_count else self.expert_keep_rate
+            self.writer.log_scalar("test/acc1", test_stats["acc1"], keep_rate_or_count)
+            self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
+            self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", test_stats[f"batch_{self.testLoader.batch_size}_time"], keep_rate_or_count)
+
+            max_accuracy = test_stats["acc1"]
+
+            print(f"Max accuracy: {max_accuracy:.2f}%")
+            self.writer.log_scalar("test/acc1/max", max_accuracy, keep_rate_or_count)
+
+            log_stats = {
+                **{f"test_{k}": v for k, v in test_stats.items()},
+                "keep_rate_or_count": keep_rate_or_count,
                 "n_parameters": self.n_parameters,
             }
 
@@ -356,6 +389,9 @@ class VolumeDropping(ExpertDropping):
 
                 self.gates[name] = (module, hook)
 
+                if isinstance(module, CustomizedGshardGate):
+                    module.return_unpruned_topk = True
+
     def drop(self, keep_rate: float | int, model: nn.Module):
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
@@ -386,6 +422,9 @@ class VolumeDropping(ExpertDropping):
                 (expert_volumes, gate.expert_volume.unsqueeze(dim=0)), dim=0
             )
             hook.remove()
+
+            if isinstance(gate, CustomizedGshardGate):
+                gate.return_unpruned_topk = False
 
         print(f"dropped expert volumes:")
 
@@ -434,7 +473,13 @@ class VolumeDropping(ExpertDropping):
     def record_expert_volume(device, self, inputs, output) -> None:
         # output[0] = [B*T, topk]
         # add 1 at indices, [B*T, topk] -> [B*T, experts]
-        top_k_idx, score = output
+        
+        if isinstance(self, CustomizedGshardGate):
+            # pruned_top_k_idx, score = output
+            top_k_idx = self._topk_idx
+        else:
+            top_k_idx, score = output
+        
         top_k_scattered = th.scatter_add(
             input=th.zeros((*top_k_idx.shape[:-1], self.tot_expert), device=device),
             dim=-1,

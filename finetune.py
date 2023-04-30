@@ -550,8 +550,9 @@ def main(args):
     if args.distillation_type != "none" and args.finetune and not args.eval:
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
-    timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
-    output_dir = os.path.join(args.output_dir, timestr)
+    # timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
+    # output_dir = os.path.join(args.output_dir, timestr)
+    output_dir = args.output_dir
     args.output_dir = output_dir
 
     os.makedirs(output_dir, exist_ok=True)
@@ -870,11 +871,7 @@ def main(args):
     # token_merge.main()
     # tome_merge.main()
 
-    test_stats = evaluate(data_loader_test, model, device)
-
-    keep_rate_or_count = args.expert_keep_rate if args.expert_keep_rate else args.expert_drop_count
-    writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
-    writer.log_scalar(f"batch_{args.batch_size}_time", test_stats[f"batch_{args.batch_size}_time"], keep_rate_or_count)
+    # test_stats = evaluate(data_loader_test, model, device)
 
     writer.close()
 

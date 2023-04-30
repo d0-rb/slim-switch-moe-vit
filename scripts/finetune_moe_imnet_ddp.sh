@@ -24,7 +24,8 @@ n=0  # seed
 validation_size=0.001
 epochs=300
 batchsize=1024
-datapath="./imagenet"
+# datapath="./imagenet"
+datapath="../ImageNet"
 
 #NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=$cuda torchrun --nproc_per_node=$num_cuda --master_port=$port main.py --model $model --data-set $dataset \
 CUDA_VISIBLE_DEVICES=$cuda python finetune.py --model $model --data-set $dataset\
