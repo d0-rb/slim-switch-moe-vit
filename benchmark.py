@@ -388,20 +388,22 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
         torchscript=False,
         writer=None,
         keeprate=1.0,
+        loader=None,
         **kwargs,
     ):
         super().__init__(
             model_name=model_name, device=device, torchscript=torchscript, **kwargs
         )
         self.keeprate = keeprate
+        self.loader = loader
         self.writer = writer
         self.model.eval()
 
     def run(self):
-        def _step():
+        def _step(data):
             t_step_start = self.time_fn()
             with self.amp_autocast():
-                output = self.model(self.example_inputs)
+                output = self.model(data)
             t_step_end = self.time_fn(True)
             return t_step_end - t_step_start
 
@@ -414,22 +416,36 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
             self._init_input()
 
             for _ in range(self.num_warm_iter):
-                _step()
+                _step(self.example_inputs)
 
             total_step = 0.0
             num_samples = 0
-            t_run_start = self.time_fn()
-            for i in range(self.num_bench_iter):
-                delta_fwd = _step()
-                total_step += delta_fwd
-                num_samples += self.batch_size
-                num_steps = i + 1
-                if num_steps % self.log_freq == 0:
-                    _logger.info(
-                        f"Infer [{num_steps}/{self.num_bench_iter}]."
-                        f" {num_samples / total_step:0.2f} samples/sec."
-                        f" {1000 * total_step / num_steps:0.3f} ms/step."
-                    )
+            if self.loader is None:
+                t_run_start = self.time_fn()
+                for i in range(self.num_bench_iter):
+                    delta_fwd = _step(self.example_inputs)
+                    total_step += delta_fwd
+                    num_samples += self.batch_size
+                    num_steps = i + 1
+                    if num_steps % self.log_freq == 0:
+                        _logger.info(
+                            f"Infer [{num_steps}/{self.num_bench_iter}]."
+                            f" {num_samples / total_step:0.2f} samples/sec."
+                            f" {1000 * total_step / num_steps:0.3f} ms/step."
+                        )
+            else:
+                for i, data in enumerate(self.loader):  # range(self.num_bench_iter):
+                    delta_fwd = _step(data)
+                    total_step += delta_fwd()
+                    num_samples += self.batch_size
+                    num_steps = i + 1
+                    if num_steps % self.log_freq == 0:
+                        _logger.info(
+                            f"Infer [{num_steps}/{self.num_bench_iter}]."
+                            f" {num_samples / total_step:0.2f} samples/sec."
+                            f" {1000 * total_step / num_steps:0.3f} ms/step."
+                        )
+
             t_run_end = self.time_fn(True)
             t_run_elapsed = t_run_end - t_run_start
 
