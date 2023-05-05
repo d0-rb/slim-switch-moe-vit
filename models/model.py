@@ -87,7 +87,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -110,7 +110,7 @@ def deit_sw_tiny_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     # if pretrained:
@@ -132,7 +132,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -155,7 +155,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -164,7 +164,17 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
             map_location="cpu",
             check_hash=True,
         )
-        model.load_state_dict(checkpoint["model"])
+        state_dict = model.state_dict()
+        for k in state_dict:
+            if (
+                k in checkpoint["model"]
+                and state_dict[k].shape == checkpoint["model"][k].shape
+            ):
+                state_dict[k] = checkpoint["model"][k]
+            else:
+                print(f"not loading this {k}")
+
+        model.load_state_dict(state_dict)
     return model
 
 
@@ -178,7 +188,7 @@ def deit_tiny_distilled_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -201,7 +211,7 @@ def deit_small_distilled_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -224,7 +234,7 @@ def deit_base_distilled_patch16_224(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -248,7 +258,7 @@ def deit_base_patch16_384(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:
@@ -272,7 +282,7 @@ def deit_base_distilled_patch16_384(pretrained=False, **kwargs):
         mlp_ratio=4,
         qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
+        **kwargs,
     )
     model.default_cfg = _cfg()
     if pretrained:

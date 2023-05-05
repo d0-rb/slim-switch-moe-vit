@@ -113,7 +113,7 @@ class HubMeDrop(BasePruning):
                 # results_af = evaluate(self.testloader, self.model, self.device)
                 acc_b4[j, i] = results_b4["acc1"]
                 # acc_af[i] = results_af["acc1"]
-                # speed[j, i] = throughput["step_time"]
+                speed[j, i] = throughput["step_time"]
 
         # os.remove(org_pth)
 
