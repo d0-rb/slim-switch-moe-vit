@@ -34,9 +34,9 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--expert-keep-count",
-            default=0,
+            default=-1,
             type=int,
-            help="how many experts to keep. if 0, ignore and use keep rate instead",
+            help="how many experts to keep. if -1, ignore and use keep rate instead",
         )
         parser.add_argument(
             "--expert-drop-type",
@@ -53,8 +53,8 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--softmax-rescale",
-            default=False,
-            type=bool,
+            default='false',
+            type=str,
             help="whether to do softmax rescaling or not",
         )
 
@@ -98,7 +98,7 @@ class ExpertDropping(BasePruning):
         self.drop_local = args.expert_drop_local.lower() == 'true'
         self.do_finetune = args.epochs > 0
         self.expert_keep_count: int = args.expert_keep_count
-        self.softmax_rescale: bool = args.softmax_rescale
+        self.softmax_rescale: bool = args.softmax_rescale.lower() == 'true'
 
     def benchmark(self, loader):
         input_size = self.args.input_size
@@ -117,25 +117,35 @@ class ExpertDropping(BasePruning):
         return results
 
     def prune(self, *args, **kwargs):
-        if self.expert_keep_count:
+        if self.expert_keep_count > -1:
             if self.expert_keep_count < 0:
                 raise ValueError("expert_keep_count, as an int, must be >= 0")
         else:
             if not 0 <= self.keep_rate <= 1:
                 raise ValueError("expert_keep_rate, as a float, must be in range [0, 1]")
-
-        dropped = self.drop(keep_rate=self.expert_keep_count if self.expert_keep_count else self.keep_rate, model=self.model)
+        
         for name, module in self.model.named_modules():
-            if isinstance(module, CustomizedNaiveGate) or isinstance(
-                module, CustomizedGshardGate
-            ):
+            if isinstance(module, CustomizedNaiveGate):
+                module.softmax_rescale = self.softmax_rescale
+            if isinstance(module, CustomizedGshardGate):
+                module.softmax_rescale = self.softmax_rescale
+                module.disable_gshard = True
+
+        dropped = self.drop(keep_rate=self.expert_keep_count if self.expert_keep_count > -1 else self.keep_rate)
+        for name, module in self.model.named_modules():
+            if isinstance(module, CustomizedNaiveGate):
                 print(
                     f"Gate {name} dropped experts: {(module.expert_mapping == -1).sum().item()}"
                 )
+            if isinstance(module, CustomizedGshardGate):
+                print(
+                    f"Gate {name} dropped experts: {(module.expert_mapping == -1).sum().item()}"
+                )
+                module.disable_gshard = False
 
         return dropped
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int):
         raise NotImplementedError("drop method must be implemented in subclass")
 
     # this method is no longer needed
@@ -182,7 +192,7 @@ class ExpertDropping(BasePruning):
         # add norms and cls token to optimizer, add hook to correct dropped expert softmax
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedMoEMLP):
-                module.gate_hook = partial(self.store_gate_info, module)
+                # module.gate_hook = partial(self.store_gate_info, module)
                 # module.register_forward_hook(
                 # partial(self.correct_expert_softmax, self.device)
                 # )
@@ -295,7 +305,7 @@ class ExpertDropping(BasePruning):
                 f"Accuracy of the network on the {len(self.testLoader.dataset)} test images: {test_stats['acc1']:.1f}%"
             )
 
-            keep_rate_or_count = self.expert_keep_count if self.expert_keep_count else self.expert_keep_rate
+            keep_rate_or_count = self.expert_keep_count if self.expert_keep_count > -1 else self.keep_rate
             self.writer.log_scalar("test/acc1", test_stats["acc1"], keep_rate_or_count)
             # self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
             self.writer.log_scalar("samples_per_sec", throughput['samples_per_sec'], keep_rate_or_count)
@@ -326,10 +336,10 @@ class ExpertDropping(BasePruning):
 
 # randomly drop experts equally among all gates
 class RandomDropping(ExpertDropping):
-    def drop(self, keep_rate: float | int, model: nn.Module) -> None:
+    def drop(self, keep_rate: float | int) -> None:
         gates = [
             module
-            for module in model.modules()
+            for module in self.model.modules()
             if isinstance(module, CustomizedNaiveGate)
             or isinstance(module, CustomizedGshardGate)
         ]
@@ -412,7 +422,7 @@ class VolumeDropping(ExpertDropping):
                 if isinstance(module, CustomizedGshardGate):
                     module.return_unpruned_topk = True
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int):
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
         else:
@@ -424,7 +434,7 @@ class VolumeDropping(ExpertDropping):
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                outputs = self.model(samples)
 
         expert_volume_modules = []
         expert_volumes = th.zeros(
@@ -538,7 +548,7 @@ class NormDropping(ExpertDropping):
 
                 self.moes[name] = (module, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int):
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
         else:
@@ -550,7 +560,7 @@ class NormDropping(ExpertDropping):
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                outputs = self.model(samples)
 
         expert_norm_modules = []
         expert_norms = th.zeros(
@@ -687,7 +697,7 @@ class MeanShiftDropping(ExpertDropping):
 
                 self.moes[name] = (module, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int):
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
         else:
@@ -699,7 +709,7 @@ class MeanShiftDropping(ExpertDropping):
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                outputs = self.model(samples)
 
         expert_mean_modules = []
         expert_mean_shifts = th.zeros(
@@ -839,7 +849,7 @@ class CosineSimilarityDropping(ExpertDropping):
 
                 self.moes[name] = (module, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int):
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
         else:
@@ -851,7 +861,7 @@ class CosineSimilarityDropping(ExpertDropping):
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                outputs = self.model(samples)
 
         expert_similarity_modules = []
         expert_similarities = th.zeros(
@@ -990,7 +1000,7 @@ class ClassAttnDropping(ExpertDropping):
 
                 self.moes[name] = (moe, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int):
         if isinstance(keep_rate, float):
             num_dropped = int(self.total_experts * (1 - keep_rate))
         else:
@@ -1002,7 +1012,7 @@ class ClassAttnDropping(ExpertDropping):
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                outputs = self.model(samples)
 
         expert_class_attn_modules = []
         expert_class_attns = th.zeros(

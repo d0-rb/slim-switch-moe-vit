@@ -50,6 +50,7 @@ class CustomizedNaiveGate(NaiveGate):
         self.register_forward_hook(self.apply_expert_mapping)
 
         self.gate_scores = None
+        self.softmax_rescale = False
 
     def set_expert_mapping(self, mapping: th.Tensor):
         """mapping: 1D array ex: [0,1,2,3,4,5] which maps expert at index position to expert at
@@ -64,7 +65,10 @@ class CustomizedNaiveGate(NaiveGate):
         gate_top_k_idx = self.expert_mapping[output[0]]
         mask = gate_top_k_idx[:, 0] == gate_top_k_idx[:, 1]
         gate_score[mask, 1] = 0
-        gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
+        if self.softmax_rescale:
+            gate_score[mask, 0] *= 2
+        else:
+            gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
         gate_top_k_idx[mask, 1] = -1
         if len(output) == 2:
             return gate_top_k_idx, gate_score
@@ -73,7 +77,7 @@ class CustomizedNaiveGate(NaiveGate):
 
 
 class CustomizedGshardGate(GShardGate):
-    """fmoe's naive gate with experts mapping"""
+    """fmoe's gshard gate with experts mapping"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -82,6 +86,7 @@ class CustomizedGshardGate(GShardGate):
         # self.register_forward_hook(self.apply_expert_mapping)
 
         self.gate_scores = None
+        self.softmax_rescale = False
         if 'return_unpruned_topk' in kwargs and kwargs['return_unpruned_topk']:
             self.return_unpruned_topk = True
         else:
@@ -172,16 +177,26 @@ class CustomizedGshardGate(GShardGate):
 
         # get the sum of unskipped expert softmaxes
         gate_score[first_skipped, 0] = 0
-        gate_score[first_skipped, 1] = (
-            1 - gate_score[first_skipped, 1].detach() + gate_score[first_skipped, 1]
-        )
-        gate_score[second_skipped, 0] = (
-            1 - gate_score[second_skipped, 0].detach() + gate_score[second_skipped, 0]
-        )
+        if self.softmax_rescale:
+            gate_score[first_skipped, 1] *= 2
+        else:
+            gate_score[first_skipped, 1] = (
+                1 - gate_score[first_skipped, 1].detach() + gate_score[first_skipped, 1]
+            )
+        
+        if self.softmax_rescale:
+            gate_score[second_skipped, 0] *= 2
+        else:
+            gate_score[second_skipped, 0] = (
+                1 - gate_score[second_skipped, 0].detach() + gate_score[second_skipped, 0]
+            )
         gate_score[second_skipped, 1] = 0
 
         gate_score[mask, 1] = 0
-        gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
+        if self.softmax_rescale:
+            gate_score[mask, 0] *= 2
+        else:
+            gate_score[mask, 0] = 1 - gate_score[mask, 0].detach() + gate_score[mask, 0]
         gate_top_k_idx[mask, 1] = placeholder_idx
         
         return gate_top_k_idx, gate_score

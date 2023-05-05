@@ -625,7 +625,7 @@ def main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
-        drop_last=True,
+        drop_last=len(dataset_val) > args.batch_size * utils.get_world_size(),
     )
     if args.ThreeAugment:
         data_loader_train.dataset.transform = new_data_aug_generator(args)
@@ -805,19 +805,19 @@ def main(args):
     # )
 
     expert_dropping = droptypes[args.expert_drop_type](
-    model=model_without_ddp,
-    trainloader=data_loader_train,
-    valloader=data_loader_val,
-    testloader=data_loader_test,
-    criterion=criterion,
-    args=args,
-    writer=writer,
-    loss_scaler=loss_scaler,
-    optimizer=optimizer,
-    lr_scheduler=lr_scheduler,
-    model_ema=model_ema,
-    mixup_fn=mixup_fn,
-    device=device,
+        model=model_without_ddp,
+        trainloader=data_loader_train,
+        valloader=data_loader_val,
+        testloader=data_loader_test,
+        criterion=criterion,
+        args=args,
+        writer=writer,
+        loss_scaler=loss_scaler,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        model_ema=model_ema,
+        mixup_fn=mixup_fn,
+        device=device,
     )
     # token_merge = DropTokens(
     # model=model,
