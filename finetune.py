@@ -550,9 +550,9 @@ def main(args):
     if args.distillation_type != "none" and args.finetune and not args.eval:
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
-    # timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
-    # output_dir = os.path.join(args.output_dir, timestr)
-    output_dir = args.output_dir
+    timestr = time.strftime("%Hh%Mm%Ss_on_%b_%d_%Y")
+    output_dir = os.path.join(args.output_dir, timestr)
+    # output_dir = args.output_dir
     args.output_dir = output_dir
 
     os.makedirs(output_dir, exist_ok=True)

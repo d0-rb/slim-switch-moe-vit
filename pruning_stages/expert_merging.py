@@ -2,7 +2,11 @@
 # mypy: disable-error-code = attr-defined
 import argparse
 import copy
+import os
+import time
+import warnings
 import typing as typ
+import logging
 
 import torch as th
 from tqdm import tqdm
@@ -13,28 +17,94 @@ from .engine import train_one_epoch
 from .models.vision_transformer import Block
 from .models.vit_moe import CustomizedMoEMLP
 
+warnings.filterwarnings("ignore")
+logging.disable(logging.WARNING)
 
 class ExpertMerging(BasePruning):
     @staticmethod
     def get_parser(parser: argparse.ArgumentParser):
-        parser.add_argument("--experts-merge-threshold", default=0.5)
-        parser.add_argument("--experts-merge-step", default=1)
+        parser.add_argument("--experts-merge-threshold", type=float, default=0.5)
+        parser.add_argument("--experts-merge-step", type=int, default=1)
         # add your specific argument here #
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
     def main(self):
-        self.prune()
-        self.finetune()
+        with th.no_grad():
+            # self.matrix()
+            self.prune()
+            # self.matrix()
+        # self.finetune()
 
     def finetune(self, *args, **kwargs):
         pass
 
+    def matrix(self, *args, **kwargs):
+
+        if os.path.isfile('stability_mx_truncateds.pt'):
+            print("loading stability_mx_truncated")
+            self.stability_mx_truncated = th.load('stability_mx_truncated.pt')
+        else:
+            print("setting baseline loss")
+            baseline_info = evaluate(self.valloader, self.model, self.device)
+
+            experts_mapping, experts_parameters = self.get_experts_mapping()
+            # experts_mapping: typ.List[th.Tensor]
+            # expedrts_parameters: typ.List[Th.Tensor]
+
+            expert_parameters_copy = copy.deepcopy(experts_parameters)
+            expert_mappings_copy = copy.deepcopy(experts_mapping)
+
+            num_experts = len(experts_mapping[0].unique().tolist())
+            self.stability_mx_truncated = th.zeros(
+                    len(experts_mapping), num_experts, num_experts, self.args.experts_merge_step
+                )
+            alphas = th.linspace(start=0.5, end=0.5, steps=self.args.experts_merge_step)
+            # alphas = [0.5]
+            time_mx = time.time()
+            for layer, (mapping, parameters, cp_mapping, cp_parameters) in enumerate(
+                zip(
+                    experts_mapping,
+                    experts_parameters,
+                    expert_mappings_copy,
+                    expert_parameters_copy,
+                )
+            ):
+                # TODO: check for -1 experts
+                # mapping =[0,1,2,3,4,5,6,7,8,9....32]
+                # mapping = [0,-1,1-1,-1,1-,1-1,1, ...32]
+                unique_experts = mapping.unique().tolist()
+                num_experts = len(unique_experts)
+                stability_mx = th.zeros(
+                    num_experts, num_experts, self.args.experts_merge_step
+                )
+                for i in tqdm(range(num_experts), total=num_experts):
+                    expert_1 = unique_experts[i]
+                    # this should be actual index position within weight matrix
+                    # for j in tqdm(range(i + 1, num_experts), total=num_experts - i - 1):
+                    for j in range(i + 1, num_experts):
+                        expert_2 = unique_experts[j]
+                        # stability_mx[i, j] = th.zeros(self.args.experts_merge_step)
+                        stability_mx[i, j] = self._merge_and_test_pair_of_experts(
+                            parameters,
+                            cp_parameters,
+                            mapping,
+                            cp_mapping,
+                            expert_1,
+                            expert_2,
+                            alphas,
+                            baseline_info,
+                        )  # size is equal to alphas
+                self.stability_mx_truncated[layer,:,:,:] = stability_mx
+
+            elapsed_mx = time.time() - time_mx
+            print(f'compute stability_mx_all in {elapsed_mx:.2f} s')
+            th.save(self.stability_mx_truncated, 'stability_mx_truncated.pt')
+
     def prune(self, *args, **kwargs):
         print("setting baseline loss")
         baseline_info = evaluate(self.valloader, self.model, self.device)
-
         experts_mapping, experts_parameters = self.get_experts_mapping()
         # experts_mapping: typ.List[th.Tensor]
         # expedrts_parameters: typ.List[Th.Tensor]
@@ -42,40 +112,24 @@ class ExpertMerging(BasePruning):
         expert_parameters_copy = copy.deepcopy(experts_parameters)
         expert_mappings_copy = copy.deepcopy(experts_mapping)
 
-        alphas = th.linspace(start=0, end=1, steps=self.args.experts_merge_step)
-
-        for layer, (mapping, parameters, cp_mapping, cp_parameters) in enumerate(
-            zip(
-                experts_mapping,
-                experts_parameters,
-                expert_mappings_copy,
-                expert_parameters_copy,
+        num_experts = len(experts_mapping[0].unique().tolist())
+        stability_mx_all = th.zeros(
+                len(experts_mapping), num_experts, num_experts, self.args.experts_merge_step-1
             )
+
+        alphas = th.linspace(start=0, end=1, steps=self.args.experts_merge_step+1)[1:-1].cuda()
+        time_mx = time.time()
+        for layer, (mapping, parameters, cp_mapping, cp_parameters, stability_mx) in enumerate(
+                zip(
+                    experts_mapping,
+                    experts_parameters,
+                    expert_mappings_copy,
+                    expert_parameters_copy,
+                    self.stability_mx_truncated,
+                )
         ):
-            # TODO: check for -1 experts
-            # mapping =[0,1,2,3,4,5,6,7,8,9....32]
-            # mapping = [0,-1,1-1,-1,1-,1-1,1, ...32]
             unique_experts = mapping.unique().tolist()
             num_experts = len(unique_experts)
-            stability_mx = th.zeros(
-                num_experts, num_experts, self.args.experts_merge_step
-            )
-            for i in tqdm(range(num_experts), total=num_experts):
-                expert_1 = unique_experts[i]
-                # this should be actual index position within weight matrix
-                for j in tqdm(range(i + 1, num_experts), total=num_experts - i - 1):
-                    expert_2 = unique_experts[j]
-                    stability_mx[i, j] = self._merge_and_test_pair_of_experts(
-                        parameters,
-                        cp_parameters,
-                        mapping,
-                        cp_mapping,
-                        expert_1,
-                        expert_2,
-                        alphas,
-                        baseline_info,
-                    )  # size is equal to alphas
-
             mean_stability_mx = stability_mx.mean(dim=-1)  # [ E x E x |a| ] -> [E x E]
             mean_stability_mx = (
                 mean_stability_mx + mean_stability_mx.T
@@ -84,7 +138,6 @@ class ExpertMerging(BasePruning):
                 mean_stability_mx > self.args.experts_merge_threshold
             ] = float("inf")
             mean_stability_mx.fill_diagonal_(float("inf"))
-
             score, candidates = mean_stability_mx.topk(k=1, dim=-1, largest=False)
             ###
             # mean_stability_mx.shape [E x E]
@@ -107,22 +160,30 @@ class ExpertMerging(BasePruning):
                 candidate = candidates[expert].squeeze().item()
                 if seen[candidate]:
                     continue
-
-                alpha_idx = stability_mx[expert, candidate].topk(
+                # stability_mx_full = th.zeros(num_experts, num_experts, self.args.experts_merge_step)
+                stability_mx_alpha = self._merge_and_test_pair_of_experts(
+                    parameters,
+                    cp_parameters,
+                    mapping,
+                    cp_mapping,
+                    unique_experts[expert],
+                    unique_experts[candidate],
+                    alphas,
+                    baseline_info,
+                )  # size is equal to alphas
+                stability_mx_all[layer, expert, candidate, :] = stability_mx_alpha
+                alpha_idx = stability_mx_alpha.topk(
                     k=1, dim=-1, largest=False
                 )[1]
                 #####
-                # stability_mx -> |E x E x alphas|
-
+                # stability_mx -> |layer x E x E x alphas|
                 #####
-
                 alpha = alphas[alpha_idx].item()
 
                 # expert_src = min(expert, candidate)
                 # expert_tgt = max(expert, candidate)
                 ####
                 # expert_src = alpha * expert_src + (1-alpha) * expert_tgt
-
                 ####
 
                 self._merge_experts(
@@ -137,6 +198,10 @@ class ExpertMerging(BasePruning):
 
                 seen[expert] = True
                 seen[candidate] = True
+
+        elapsed_mx = time.time() - time_mx
+        th.save(stability_mx_all, f'stability_mx_threhold_{self.args.experts_merge_threshold}.pt')
+        print(f'merge stability_mx in {elapsed_mx:.2f} s')
 
     def _merge_and_test_pair_of_experts(
         self,
