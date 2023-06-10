@@ -43,17 +43,17 @@ class HubMeDrop(BasePruning):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.tome_r = np.arange(0, 25, 8)
-        # self.tome_k = np.arange(28, 99, 14)
-        self.tome_k = [0]
-        self.tome_p = np.linspace(0.9, 1.0, 10)
-        # self.tome_p = np.linspace(0.8, 1.0, 10)
-        # tome
-        self.tome_p = np.append(self.tome_p, 0)
-        # self.tome_r = np.arange(0, 24, 12)
+        # self.tome_r = np.arange(0, 25, 8)
+        # # self.tome_k = np.arange(28, 99, 14)
+        # self.tome_k = [0]
+        self.tome_p = np.linspace(0.0, 1.0, 20)
+        # # self.tome_p = np.linspace(0.8, 1.0, 10)
+        # # tome
+        # self.tome_p = np.append(self.tome_p, 0)
+        self.tome_r = np.arange(0, 24, 4)
+        # self.tome_p = np.arange(28, 196, 28)
         # self.tome_k = np.arange(28, 98, 7)
-        # self.tome_r = [16]
-        # self.tome_k = [0, 28, ]
+        self.tome_r = [0]
         self.init()
 
     def main(self):
@@ -558,11 +558,15 @@ class GshardGateDropout(CustomizedGshardGate):
         if p == 0:
             return topk_idx
 
-        ks_score = ~kolmogorov_smirnov(
-            gate_score, th.rand_like(gate_score), alpha=th.as_tensor([p])
-        )[0].squeeze()
-        topk_idx[ks_score, 0] = -1
-        topk_idx[ks_score, 1] = -1
+        num_dropped = int(p * topk_idx.size(0))
+
+        prob_dist = gate_score.softmax(dim=-1)
+        uni_dist = th.full_like(gate_score, 1 / gate_score.size(-1))
+        jsd = JSD()
+        score = jsd(prob_dist, uni_dist)
+
+        sorted_idx = th.argsort(score, dim=0)[0:num_dropped]
+        topk_idx[sorted_idx] = -1
 
         return topk_idx
 
@@ -634,3 +638,14 @@ def kolmogorov_smirnov(
 
     sup, _ = (cdf1 - cdf2).abs().max(dim=-1, keepdim=True)
     return sup > sup_conf, alpha_D(sup, n1, n2)
+
+
+class JSD(nn.Module):
+    def __init__(self):
+        super(JSD, self).__init__()
+        self.kl = nn.KLDivLoss(reduction="none", log_target=True)
+
+    def forward(self, p: torch.tensor, q: torch.tensor):
+        p, q = p.view(-1, p.size(-1)), q.view(-1, q.size(-1))
+        m = (0.5 * (p + q)).log()
+        return 0.5 * (self.kl(p.log(), m).sum(dim=-1) + self.kl(q.log(), m).sum(dim=-1))

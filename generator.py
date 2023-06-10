@@ -276,7 +276,7 @@ def get_args_parser():
     parser.add_argument(
         "--reprob",
         type=float,
-        default=0.25,
+        default=0.0,
         metavar="PCT",
         help="Random erase prob (default: 0.25)",
     )
@@ -410,7 +410,7 @@ def get_args_parser():
     )
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
     parser.add_argument(
-        "--eval-crop-ratio", default=0.875, type=float, help="Crop ratio for evaluation"
+        "--eval-crop-ratio", default=1.0, type=float, help="Crop ratio for evaluation"
     )
     parser.add_argument(
         "--dist-eval",
@@ -836,26 +836,43 @@ def main(args):
     #################################
     # insert class derived from pruning_stages/base.py here
     # pruning / fine-tuning should be self-contained under that class
+    expert_dropping.drop_local = False
 
-    if args.drop_experts:
-        expert_dropping.prune()
-    if args.merge_experts:
-        expert_merging.prune()
-    if args.drop_tokens:
-        tome_merge.main()
+    score = expert_dropping.score()
+    expert_dropping.drop(0.5, score)
+    expert_dropping.prune()
+    # if args.drop_experts:
+    # expert_dropping.prune()
+    # if args.merge_experts:
+    # expert_merging.prune()
+    # if args.drop_tokens:
+    # tome_merge.main()
 
-    if args.finetune:
-        pass
-
-    # test_stats = evaluate(data_loader_test, model, device)
+    test_stats = evaluate(data_loader_test, model, device)
     writer.close()
 
+
+default_settings = {
+    "lr": 1e-3,
+    "epochs": 300,
+    "weight_decay": 0.05,
+    "shed": "cosine",
+    "input_size": 224,
+    "opt": "adamw",
+    "warmup_lr": 1e6,
+    "mixup": 0.8,
+    "drop_path": 0.0,
+    "cutmix": 1.0,
+}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         "DeiT training and evaluation script", parents=[get_args_parser()]
     )
     args = parser.parse_args()
+    for k, v in default_settings.items():
+        setattr(args, k, v)
+
     if (args.starting_threshold is not None) and (args.target_threshold is not None):
         args.starting_threshold_dense = args.starting_threshold
         args.target_threshold_dense = args.target_threshold
@@ -865,4 +882,5 @@ if __name__ == "__main__":
     if args.output_dir:
         print(f"output dir: {args.output_dir}")
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
     main(args)

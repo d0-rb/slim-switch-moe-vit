@@ -3,6 +3,7 @@ import datetime
 import json
 import random
 import time
+import typing as typ
 from functools import partial
 from pathlib import Path
 
@@ -13,12 +14,12 @@ from timm.utils import get_state_dict  # type: ignore[import]
 
 import utils
 from .base import BasePruning
+from .benchmark import InferenceBenchmarkRunner
+from .hubme import plot_and_save
 from .models.vit_moe import Block
 from .models.vit_moe import CustomizedGshardGate
 from .models.vit_moe import CustomizedMoEMLP
 from .models.vit_moe import CustomizedNaiveGate
-from .benchmark import InferenceBenchmarkRunner
-from .hubme import plot_and_save
 from engine import evaluate
 from engine import train_one_epoch
 
@@ -47,7 +48,7 @@ class ExpertDropping(BasePruning):
         )
         parser.add_argument(
             "--expert-drop-local",
-            default='false',
+            default="false",
             type=str,
             help="whether to drop locally or not",
         )
@@ -95,7 +96,7 @@ class ExpertDropping(BasePruning):
         self.n_parameters = sum(
             p.numel() for p in model.parameters() if p.requires_grad
         )
-        self.drop_local = args.expert_drop_local.lower() == 'true'
+        self.drop_local = args.expert_drop_local.lower() == "true"
         self.do_finetune = args.epochs > 0
         self.expert_keep_count: int = args.expert_keep_count
         self.softmax_rescale: bool = args.softmax_rescale
@@ -122,9 +123,16 @@ class ExpertDropping(BasePruning):
                 raise ValueError("expert_keep_count, as an int, must be >= 0")
         else:
             if not 0 <= self.keep_rate <= 1:
-                raise ValueError("expert_keep_rate, as a float, must be in range [0, 1]")
+                raise ValueError(
+                    "expert_keep_rate, as a float, must be in range [0, 1]"
+                )
 
-        dropped = self.drop(keep_rate=self.expert_keep_count if self.expert_keep_count else self.keep_rate, model=self.model)
+        # dropped = self.drop(
+        # keep_rate=self.expert_keep_count
+        # if self.expert_keep_count
+        # else self.keep_rate,
+        # model=self.model,
+        # )
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedNaiveGate) or isinstance(
                 module, CustomizedGshardGate
@@ -133,203 +141,26 @@ class ExpertDropping(BasePruning):
                     f"Gate {name} dropped experts: {(module.expert_mapping == -1).sum().item()}"
                 )
 
-        return dropped
+        # return dropped
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
+    def drop(self, keep_rate: float | int, expert_score: th.Tensor):
         raise NotImplementedError("drop method must be implemented in subclass")
 
-    # this method is no longer needed
-    @staticmethod
-    def correct_expert_softmax(device, self, input, output):
-        top_k_idx = self.top_k_idx.reshape(*output.shape[:2], self.top_k_idx.shape[-1])
-        gate_score = self.gate_score.reshape(
-            *output.shape[:2], self.gate_score.shape[-1]
-        )
-        skipped_experts = top_k_idx == -1
-        num_skipped_experts = skipped_experts.sum(
-            dim=-1, keepdim=True
-        )  # for each token, how many dropped experts it was sent to
-        # dont rescale outputs where all or no experts were skipped
-        outputs_to_rescale = (num_skipped_experts < top_k_idx.shape[-1]) & (
-            num_skipped_experts > 0
-        )
-
-        # get the sum of unskipped expert softmaxes
-        unskipped_expert_sum = (gate_score * ~skipped_experts).sum(dim=-1, keepdim=True)
-        normalization_factor = th.ones_like(
-            num_skipped_experts, device=device, dtype=output.dtype
-        )
-        normalization_factor[outputs_to_rescale] = (
-            1 / unskipped_expert_sum[outputs_to_rescale]
-        ).to(dtype=output.dtype)
-
-        # rescale outputs for tokens where some experts were skipped
-        rescaled_output = output * normalization_factor.detach()
-
-        return rescaled_output
+    def score(self):
+        raise NotImplementedError("score method must be implemented in subclass")
 
     @staticmethod
     def store_gate_info(self, top_k_idx, gate_score, _):
         self.top_k_idx = top_k_idx
         self.gate_score = gate_score
 
-    def finetune(self, *args, **kwargs):
-        # remove all params from optimizer except for moe
-        self.optimizer.param_groups.clear()  # optim.param_group = []
-        self.optimizer.state.clear()  # optim.state = defaultdict(dict)
-
-        moe_params = []
-        # add norms and cls token to optimizer, add hook to correct dropped expert softmax
-        for name, module in self.model.named_modules():
-            if isinstance(module, CustomizedMoEMLP):
-                module.gate_hook = partial(self.store_gate_info, module)
-                # module.register_forward_hook(
-                # partial(self.correct_expert_softmax, self.device)
-                # )
-                continue
-            name_hierarchy = name.split(".")
-            if (
-                len(name_hierarchy) == 3
-                and name_hierarchy[0] == "blocks"
-                and "norm" in name_hierarchy[-1]
-            ):
-                moe_params.extend(module.parameters())
-
-        moe_params.append(self.model.cls_token)
-
-        self.optimizer.add_param_group({"params": moe_params})
-
-        print(f"Start finetuning drop-expert for {self.epochs} epochs")
-        start_time = time.time()
-        max_accuracy = 0.0
-        for epoch in range(self.start_epoch, self.epochs):
-            th.cuda.reset_peak_memory_stats()
-            if self.distributed:
-                self.valLoader.sampler.set_epoch(epoch)
-                self.testLoader.sampler.set_epoch(epoch)
-
-            val_stats = train_one_epoch(
-                self.model,
-                self.criterion,
-                self.valLoader,
-                self.optimizer,
-                self.device,
-                epoch,
-                self.loss_scaler,
-                self.clip_grad,
-                self.model_ema,
-                self.mixup_fn,
-                set_training_mode=False,  # eval mode
-                args=self.args,
-            )
-
-            self.lr_scheduler.step(epoch)
-
-            if self.output_dir:
-                checkpoint_paths = [self.output_dir / "checkpoint.pth"]
-                print(f"Saving checkpoint to {checkpoint_paths}")
-                for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master(
-                        {
-                            "model": self.model.state_dict(),
-                            "optimizer": self.optimizer.state_dict(),
-                            "lr_scheduler": self.lr_scheduler.state_dict(),
-                            "epoch": epoch,
-                            "model_ema": get_state_dict(self.model_ema),
-                            "scaler": self.loss_scaler.state_dict(),
-                            "args": self.args,
-                        },
-                        checkpoint_path,
-                    )
-
-            test_stats = evaluate(self.testLoader, self.model, self.device)
-
-            print(
-                f"Accuracy of the network on the {len(self.testLoader.dataset)} test images: {test_stats['acc1']:.1f}%"
-            )
-
-            self.writer.log_scalar("val/loss", val_stats["loss"], epoch)
-            self.writer.log_scalar("test/acc1", test_stats["acc1"], epoch)
-
-            if "loss_attn" in val_stats:
-                self.writer.log_scalar("train/loss_attn", val_stats["loss_attn"], epoch)
-
-            if max_accuracy < test_stats["acc1"]:
-                # writer.add_scalar("Accuracy/test_acc1", test_stats["acc1"], epoch)
-                max_accuracy = test_stats["acc1"]
-                if self.output_dir:
-                    checkpoint_paths = [self.output_dir / "best_checkpoint.pth"]
-                    for checkpoint_path in checkpoint_paths:
-                        utils.save_on_master(
-                            {
-                                "model": self.model.state_dict(),
-                                "optimizer": self.optimizer.state_dict(),
-                                "lr_scheduler": self.lr_scheduler.state_dict(),
-                                "epoch": epoch,
-                                "model_ema": get_state_dict(self.model_ema),
-                                "scaler": self.loss_scaler.state_dict(),
-                                "args": self.args,
-                            },
-                            checkpoint_path,
-                        )
-
-            print(f"Max accuracy: {max_accuracy:.2f}%")
-            self.writer.log_scalar("test/acc1/max", max_accuracy, epoch)
-
-            log_stats = {
-                **{f"val_{k}": v for k, v in val_stats.items()},
-                **{f"test_{k}": v for k, v in test_stats.items()},
-                "epoch": epoch,
-                "n_parameters": self.n_parameters,
-            }
-
-            if self.output_dir and utils.is_main_process():
-                with (self.output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-        
-        if not self.do_finetune:
-            throughput = self.benchmark(self.testLoader)
-            test_stats = evaluate(self.testLoader, self.model, self.device)
-
-            print(
-                f"Accuracy of the network on the {len(self.testLoader.dataset)} test images: {test_stats['acc1']:.1f}%"
-            )
-
-            keep_rate_or_count = self.expert_keep_count if self.expert_keep_count else self.expert_keep_rate
-            self.writer.log_scalar("test/acc1", test_stats["acc1"], keep_rate_or_count)
-            # self.writer.log_scalar("samples_per_sec", test_stats["samples_per_sec"], keep_rate_or_count)
-            self.writer.log_scalar("samples_per_sec", throughput['samples_per_sec'], keep_rate_or_count)
-            # self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", test_stats[f"batch_{self.testLoader.batch_size}_time"], keep_rate_or_count)
-            self.writer.log_scalar(f"batch_{self.testLoader.batch_size}_time", throughput['step_time'], keep_rate_or_count)
-
-            max_accuracy = test_stats["acc1"]
-
-            print(f"Max accuracy: {max_accuracy:.2f}%")
-            self.writer.log_scalar("test/acc1/max", max_accuracy, keep_rate_or_count)
-
-            log_stats = {
-                **{f"test_{k}": v for k, v in test_stats.items()},
-                "keep_rate_or_count": keep_rate_or_count,
-                "n_parameters": self.n_parameters,
-            }
-
-            if self.output_dir and utils.is_main_process():
-                with (self.output_dir / "log.txt").open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-
-        if self.distributed:
-            th.distributed.barrier()
-        total_time = time.time() - start_time
-        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print("Training time {}".format(total_time_str))
-
 
 # randomly drop experts equally among all gates
 class RandomDropping(ExpertDropping):
-    def drop(self, keep_rate: float | int, model: nn.Module) -> None:
+    def drop(self, keep_rate: float | int, expert_score: th.Tensor = None) -> None:
         gates = [
             module
-            for module in model.modules()
+            for module in self.model.modules()
             if isinstance(module, CustomizedNaiveGate)
             or isinstance(module, CustomizedGshardGate)
         ]
@@ -386,6 +217,9 @@ class RandomDropping(ExpertDropping):
 
         print(f"dropped {num_dropped} experts out of {self.total_experts}")
 
+    def score(self):
+        return None
+
 
 # run validation on model and record volume of each expert, then drop least-visited experts
 class VolumeDropping(ExpertDropping):
@@ -399,7 +233,9 @@ class VolumeDropping(ExpertDropping):
                 module, CustomizedGshardGate
             ):
                 module.register_buffer(
-                    "expert_volume", th.zeros(module.tot_expert, device=self.device)
+                    "expert_volume",
+                    th.zeros(module.tot_expert, device=self.device),
+                    persistent=False,
                 )
 
                 self.total_experts += module.tot_expert
@@ -412,21 +248,16 @@ class VolumeDropping(ExpertDropping):
                 if isinstance(module, CustomizedGshardGate):
                     module.return_unpruned_topk = True
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
-        if isinstance(keep_rate, float):
-            num_dropped = int(self.total_experts * (1 - keep_rate))
-        else:
-            num_dropped = self.total_experts - keep_rate
-
+    def score(self):
         self.model.eval()
         for samples, targets in self.valLoader:
             samples = samples.to(self.device, non_blocking=True)
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                with th.cuda.amp.autocast():
+                    outputs = self.model(samples)
 
-        expert_volume_modules = []
         expert_volumes = th.zeros(
             (
                 0,
@@ -435,9 +266,6 @@ class VolumeDropping(ExpertDropping):
             device=self.device,
         )
         for name, (gate, hook) in self.gates.items():
-            expert_volume_modules.extend(
-                [(gate, expert) for expert in range(gate.tot_expert)]
-            )
             expert_volumes = th.cat(
                 (expert_volumes, gate.expert_volume.unsqueeze(dim=0)), dim=0
             )
@@ -446,7 +274,24 @@ class VolumeDropping(ExpertDropping):
             if isinstance(gate, CustomizedGshardGate):
                 gate.return_unpruned_topk = False
 
+        return expert_volumes
+
+    def drop(
+        self,
+        keep_rate: float | int,
+        model: nn.Module,
+        expert_score: th.Tensor,
+    ):
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
+
         print(f"dropped expert volumes:")
+        expert_modules = []
+        for name, (gate, hook) in self.gates.items():
+            expert_modules.extend([(gate, expert) for expert in range(gate.tot_expert)])
+            hook.remove()
 
         if self.drop_local:
             num_drop_experts_per_gate = th.linspace(
@@ -454,7 +299,7 @@ class VolumeDropping(ExpertDropping):
             ).int()[1:]
             num_drop_experts_per_gate[1:] -= num_drop_experts_per_gate[:-1].clone()
 
-            sorted_experts = th.argsort(expert_volumes, dim=-1)
+            sorted_experts = th.argsort(expert_score, dim=-1)
 
             for i, (name, (gate, hook)) in enumerate(self.gates.items()):
                 num_drop: int = num_drop_experts_per_gate[
@@ -471,20 +316,20 @@ class VolumeDropping(ExpertDropping):
                 new_mapping[dropped_experts] = -1  # drop experts
                 gate.set_expert_mapping(mapping=new_mapping)
 
-                print(f"{expert_volumes[i, dropped_experts]}")
+                print(f"{expert_score[i, dropped_experts]}")
         else:
-            expert_volumes = th.flatten(expert_volumes)
+            expert_score = th.flatten(expert_score)
             # drop experts with least volume
-            dropped_experts = th.argsort(expert_volumes)[:num_dropped]
+            dropped_experts = th.argsort(expert_score)[:num_dropped]
             dropped_across_layers = {i: 0 for i in range(len(self.gates))}
             for _dropped_expert in dropped_experts:
                 dropped_expert = _dropped_expert.item()
-                gate, expert = expert_volume_modules[dropped_expert]
+                gate, expert = expert_modules[dropped_expert]
                 gate.expert_mapping[expert] = -1
                 layer = dropped_expert // gate.tot_expert
                 dropped_across_layers[layer] += 1
 
-            print(f"{expert_volumes[dropped_experts]}")
+            print(f"{expert_score[dropped_experts]}")
             print(f"experts dropped across layers: {dropped_across_layers}")
 
         print(f"dropped {num_dropped} experts out of {self.total_experts}")
@@ -493,13 +338,13 @@ class VolumeDropping(ExpertDropping):
     def record_expert_volume(device, self, inputs, output) -> None:
         # output[0] = [B*T, topk]
         # add 1 at indices, [B*T, topk] -> [B*T, experts]
-        
+
         if isinstance(self, CustomizedGshardGate):
             # pruned_top_k_idx, score = output
             top_k_idx = self._topk_idx
         else:
             top_k_idx, score = output
-        
+
         top_k_scattered = th.scatter_add(
             input=th.zeros((*top_k_idx.shape[:-1], self.tot_expert), device=device),
             dim=-1,
@@ -523,10 +368,14 @@ class NormDropping(ExpertDropping):
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedMoEMLP):
                 module.register_buffer(
-                    "expert_norm", th.zeros(module.num_expert, device=self.device)
+                    "expert_norm",
+                    th.zeros(module.num_expert, device=self.device),
+                    persistent=False,
                 )
                 module.register_buffer(
-                    "num_forwards", th.zeros(module.num_expert, device=self.device)
+                    "num_forwards",
+                    th.zeros(module.num_expert, device=self.device),
+                    persistent=False,
                 )
 
                 self.total_experts += module.num_expert
@@ -538,22 +387,17 @@ class NormDropping(ExpertDropping):
 
                 self.moes[name] = (module, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
-        if isinstance(keep_rate, float):
-            num_dropped = int(self.total_experts * (1 - keep_rate))
-        else:
-            num_dropped = self.total_experts - keep_rate
-
+    def score(self):
         self.model.eval()
         for samples, targets in self.valLoader:
             samples = samples.to(self.device, non_blocking=True)
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                with th.cuda.amp.autocast():
+                    outputs = self.model(samples)
 
-        expert_norm_modules = []
-        expert_norms = th.zeros(
+        expert_score = th.zeros(
             (
                 0,
                 self.total_experts // len(self.moes),
@@ -561,11 +405,26 @@ class NormDropping(ExpertDropping):
             device=self.device,
         )
         for name, (moe, old_expert_fn) in self.moes.items():
+            expert_score = th.cat(
+                (expert_score, moe.expert_norm.unsqueeze(dim=0)), dim=0
+            )
+            setattr(moe, "expert_fn", old_expert_fn)
+        norms = th.linalg.norm(expert_score, dim=1)[:, None]
+        expert_score.div_(norms)
+        # print(expert_score)
+        # __import__("pdb").set_trace()
+        return expert_score
+
+    def drop(self, keep_rate: float | int, expert_score: th.Tensor):
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
+
+        expert_norm_modules = []
+        for name, (moe, old_expert_fn) in self.moes.items():
             expert_norm_modules.extend(
                 [(moe, expert) for expert in range(moe.num_expert)]
-            )
-            expert_norms = th.cat(
-                (expert_norms, moe.expert_norm.unsqueeze(dim=0)), dim=0
             )
             setattr(moe, "expert_fn", old_expert_fn)
 
@@ -577,7 +436,7 @@ class NormDropping(ExpertDropping):
             ).int()[1:]
             num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
 
-            sorted_experts = th.argsort(expert_norms, dim=-1)
+            sorted_experts = th.argsort(expert_score, dim=-1, descending=True)
 
             for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
                 num_drop: int = num_drop_experts_per_moe[
@@ -594,11 +453,11 @@ class NormDropping(ExpertDropping):
                 new_mapping[dropped_experts] = -1  # drop experts
                 moe.gate.set_expert_mapping(mapping=new_mapping)
 
-                print(f"{expert_norms[i, dropped_experts]}")
+                print(f"{expert_score[i, dropped_experts]}")
         else:
-            expert_norms = th.flatten(expert_norms)
+            expert_score = th.flatten(expert_score)
             # drop experts with lowest norms
-            dropped_experts = th.argsort(expert_norms)[:num_dropped]
+            dropped_experts = th.argsort(expert_score, descending=True)[:num_dropped]
             dropped_across_layers = {i: 0 for i in range(len(self.moes))}
             for _dropped_expert in dropped_experts:
                 dropped_expert = _dropped_expert.item()
@@ -607,7 +466,7 @@ class NormDropping(ExpertDropping):
                 layer = dropped_expert // moe.gate.tot_expert
                 dropped_across_layers[layer] += 1
 
-            print(f"{expert_norms[dropped_experts]}")
+            print(f"{expert_score[dropped_experts]}")
             print(f"experts dropped across layers: {dropped_across_layers}")
 
         print(f"dropped {num_dropped} experts out of {self.total_experts}")
@@ -667,15 +526,19 @@ class MeanShiftDropping(ExpertDropping):
                     th.zeros(
                         (module.num_expert, self.model.embed_dim), device=self.device
                     ),
+                    persistent=False,
                 )
                 module.register_buffer(
                     "expert_mean",
                     th.zeros(
                         (module.num_expert, self.model.embed_dim), device=self.device
                     ),
+                    persistent=False,
                 )
                 module.register_buffer(
-                    "num_forwards", th.zeros((module.num_expert), device=self.device)
+                    "num_forwards",
+                    th.zeros((module.num_expert), device=self.device),
+                    persistent=False,
                 )
 
                 self.total_experts += module.num_expert
@@ -687,11 +550,7 @@ class MeanShiftDropping(ExpertDropping):
 
                 self.moes[name] = (module, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
-        if isinstance(keep_rate, float):
-            num_dropped = int(self.total_experts * (1 - keep_rate))
-        else:
-            num_dropped = self.total_experts - keep_rate
+    def score(self):
 
         self.model.eval()
         for samples, targets in self.valLoader:
@@ -699,10 +558,10 @@ class MeanShiftDropping(ExpertDropping):
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                with th.cuda.amp.autocast():
+                    outputs = self.model(samples)
 
-        expert_mean_modules = []
-        expert_mean_shifts = th.zeros(
+        expert_score = th.zeros(
             (
                 0,
                 self.total_experts // len(self.moes),
@@ -710,17 +569,32 @@ class MeanShiftDropping(ExpertDropping):
             device=self.device,
         )
         for name, (moe, old_expert_fn) in self.moes.items():
-            expert_mean_modules.extend(
-                [(moe, expert) for expert in range(moe.num_expert)]
-            )
-            expert_mean_shifts = th.cat(
+            expert_score = th.cat(
                 (
-                    expert_mean_shifts,
+                    expert_score,
                     (moe.expert_mean - moe.input_mean)
                     .norm(dim=-1, p=2)
                     .unsqueeze(dim=0),
                 ),
                 dim=0,
+            )
+            setattr(moe, "expert_fn", old_expert_fn)
+        # __import__("pdb").set_trace()
+        norms = th.linalg.norm(expert_score, dim=1)[:, None]
+        expert_score.div_(norms)
+        # print(expert_score)
+        return expert_score
+
+    def drop(self, keep_rate: float | int, expert_score: th.Tensor):
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
+
+        expert_mean_modules = []
+        for name, (moe, old_expert_fn) in self.moes.items():
+            expert_mean_modules.extend(
+                [(moe, expert) for expert in range(moe.num_expert)]
             )
             setattr(moe, "expert_fn", old_expert_fn)
 
@@ -732,7 +606,7 @@ class MeanShiftDropping(ExpertDropping):
             ).int()[1:]
             num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
 
-            sorted_experts = th.argsort(expert_mean_shifts, dim=-1)
+            sorted_experts = th.argsort(expert_score, dim=-1, descending=True)
 
             for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
                 num_drop: int = num_drop_experts_per_moe[
@@ -749,11 +623,11 @@ class MeanShiftDropping(ExpertDropping):
                 new_mapping[dropped_experts] = -1  # drop experts
                 moe.gate.set_expert_mapping(mapping=new_mapping)
 
-                print(f"{expert_mean_shifts[i, dropped_experts]}")
+                print(f"{expert_score[i, dropped_experts]}")
         else:
-            expert_mean_shifts = th.flatten(expert_mean_shifts)
+            expert_score = th.flatten(expert_score)
             # drop experts with lowest mean shifts
-            dropped_experts = th.argsort(expert_mean_shifts)[:num_dropped]
+            dropped_experts = th.argsort(expert_score, descending=True)[:num_dropped]
             dropped_across_layers = {i: 0 for i in range(len(self.moes))}
             for _dropped_expert in dropped_experts:
                 dropped_expert = _dropped_expert.item()
@@ -762,7 +636,7 @@ class MeanShiftDropping(ExpertDropping):
                 layer = dropped_expert // moe.gate.tot_expert
                 dropped_across_layers[layer] += 1
 
-            print(f"{expert_mean_shifts[dropped_experts]}")
+            print(f"{expert_score[dropped_experts]}")
             print(f"experts dropped across layers: {dropped_across_layers}")
 
         print(f"dropped {num_dropped} experts out of {self.total_experts}")
@@ -824,10 +698,14 @@ class CosineSimilarityDropping(ExpertDropping):
         for name, module in self.model.named_modules():
             if isinstance(module, CustomizedMoEMLP):
                 module.register_buffer(
-                    "expert_similarity", th.zeros(module.num_expert, device=self.device)
+                    "expert_similarity",
+                    th.zeros(module.num_expert, device=self.device),
+                    persistent=False,
                 )
                 module.register_buffer(
-                    "num_forwards", th.zeros(module.num_expert, device=self.device)
+                    "num_forwards",
+                    th.zeros(module.num_expert, device=self.device),
+                    persistent=False,
                 )
 
                 self.total_experts += module.num_expert
@@ -839,22 +717,18 @@ class CosineSimilarityDropping(ExpertDropping):
 
                 self.moes[name] = (module, old_expert_fn)
 
-    def drop(self, keep_rate: float | int, model: nn.Module):
-        if isinstance(keep_rate, float):
-            num_dropped = int(self.total_experts * (1 - keep_rate))
-        else:
-            num_dropped = self.total_experts - keep_rate
-
+    def score(self):
         self.model.eval()
+
         for samples, targets in self.valLoader:
             samples = samples.to(self.device, non_blocking=True)
             # targets = targets.to(self.device, non_blocking=True)
 
             with th.no_grad():
-                outputs = model(samples)
+                with th.cuda.amp.autocast():
+                    outputs = self.model(samples)
 
-        expert_similarity_modules = []
-        expert_similarities = th.zeros(
+        expert_score = th.zeros(
             (
                 0,
                 self.total_experts // len(self.moes),
@@ -862,14 +736,27 @@ class CosineSimilarityDropping(ExpertDropping):
             device=self.device,
         )
         for name, (moe, old_expert_fn) in self.moes.items():
+            expert_score = th.cat(
+                (expert_score, moe.expert_similarity.unsqueeze(dim=0)), dim=0
+            )
+            setattr(moe, "expert_fn", old_expert_fn)
+
+        norms = th.linalg.norm(expert_score, dim=1)[:, None]
+        expert_score.div_(norms)
+        return expert_score
+
+    def drop(self, keep_rate: float | int, expert_score: th.Tensor):
+        if isinstance(keep_rate, float):
+            num_dropped = int(self.total_experts * (1 - keep_rate))
+        else:
+            num_dropped = self.total_experts - keep_rate
+
+        expert_similarity_modules = []
+        for name, (moe, old_expert_fn) in self.moes.items():
             expert_similarity_modules.extend(
                 [(moe, expert) for expert in range(moe.num_expert)]
             )
-            expert_similarities = th.cat(
-                (expert_similarities, moe.expert_similarity.unsqueeze(dim=0)), dim=0
-            )
             setattr(moe, "expert_fn", old_expert_fn)
-        expert_similarities[expert_similarities == 0] = float("inf")
 
         if self.drop_local:
             num_drop_experts_per_moe = th.linspace(
@@ -877,7 +764,7 @@ class CosineSimilarityDropping(ExpertDropping):
             ).int()[1:]
             num_drop_experts_per_moe[1:] -= num_drop_experts_per_moe[:-1].clone()
 
-            sorted_experts = th.argsort(expert_similarities, descending=True, dim=-1)
+            sorted_experts = th.argsort(expert_score, descending=True, dim=-1)
 
             for i, (name, (moe, old_expert_fn)) in enumerate(self.moes.items()):
                 num_drop: int = num_drop_experts_per_moe[
@@ -894,13 +781,11 @@ class CosineSimilarityDropping(ExpertDropping):
                 new_mapping[dropped_experts] = -1  # drop experts
                 moe.gate.set_expert_mapping(mapping=new_mapping)
 
-                print(f"{expert_similarities[i, dropped_experts]}")
+                print(f"{expert_score[i, dropped_experts]}")
         else:
-            expert_similarities = th.flatten(expert_similarities)
+            expert_score = th.flatten(expert_score)
             # drop experts with highest cosine similarity
-            dropped_experts = th.argsort(expert_similarities, descending=True)[
-                :num_dropped
-            ]
+            dropped_experts = th.argsort(expert_score, descending=True)[:num_dropped]
             dropped_across_layers = {i: 0 for i in range(len(self.moes))}
             for _dropped_expert in dropped_experts:
                 dropped_expert = _dropped_expert.item()
@@ -909,7 +794,6 @@ class CosineSimilarityDropping(ExpertDropping):
                 layer = dropped_expert // moe.gate.tot_expert
                 dropped_across_layers[layer] += 1
 
-            print(f"{expert_similarities[dropped_experts]}")
             print(f"experts dropped across layers: {dropped_across_layers}")
 
         print(f"dropped {num_dropped} experts out of {self.total_experts}")

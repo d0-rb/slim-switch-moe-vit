@@ -8,8 +8,8 @@ import csv
 import json
 import logging
 import os
-import time
 import random
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from functools import partial
@@ -505,17 +505,20 @@ class InferenceBenchmarkRunner(BenchmarkRunner):
                             f" {1000 * total_step / num_steps:0.3f} ms/step."
                         )
             else:
-                for i, data in enumerate(self.loader):  # range(self.num_bench_iter):
-                    delta_fwd = _step(data)
-                    total_step += delta_fwd()
-                    num_samples += self.batch_size
-                    num_steps = i + 1
-                    if num_steps % self.log_freq == 0:
-                        _logger.info(
-                            f"Infer [{num_steps}/{self.num_bench_iter}]."
-                            f" {num_samples / total_step:0.2f} samples/sec."
-                            f" {1000 * total_step / num_steps:0.3f} ms/step."
-                        )
+                with torch.cuda.amp.autocast():
+                    for i, data in enumerate(
+                        self.loader
+                    ):  # range(self.num_bench_iter):
+                        delta_fwd = _step(data)
+                        total_step += delta_fwd()
+                        num_samples += self.batch_size
+                        num_steps = i + 1
+                        if num_steps % self.log_freq == 0:
+                            _logger.info(
+                                f"Infer [{num_steps}/{self.num_bench_iter}]."
+                                f" {num_samples / total_step:0.2f} samples/sec."
+                                f" {1000 * total_step / num_steps:0.3f} ms/step."
+                            )
 
             t_run_end = self.time_fn(True)
             t_run_elapsed = t_run_end - t_run_start

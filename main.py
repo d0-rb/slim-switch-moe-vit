@@ -921,11 +921,25 @@ def main(args):
     writer.close()
 
 
+default_settings = {
+    "lr": 1e-3,
+    "epochs": 300,
+    "weight_decay": 0.05,
+    "shed": "cosine",
+    "input_size": 224,
+    "opt": "adamw",
+    "warmup_lr": 1e6,
+    "mixup": 0.8,
+    "drop_path": 0.0,
+    "cutmix": 1.0,
+}
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         "DeiT training and evaluation script", parents=[get_args_parser()]
     )
     args = parser.parse_args()
+    for k, v in default_settings.items():
+        setattr(args, k, v)
     if (args.starting_threshold is not None) and (args.target_threshold is not None):
         args.starting_threshold_dense = args.starting_threshold
         args.target_threshold_dense = args.target_threshold
