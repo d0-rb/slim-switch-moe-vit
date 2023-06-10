@@ -29,6 +29,7 @@ from .models.vision_transformer import Attention
 from .models.vision_transformer import Block
 from .models.vit_moe import CustomizedGshardGate
 from .models.vit_moe import CustomizedMoEMLP
+from .models.vit_moe import CustomizedNaiveGate
 
 # from tome.patch.timm import make_tome_class
 
@@ -36,24 +37,27 @@ from .models.vit_moe import CustomizedMoEMLP
 class HubMeDrop(BasePruning):
     @staticmethod
     def get_parser(parser: argparse.ArgumentParser):
-        # parser.add_argument("--attn-momentum", default=0.75, type=float)
-        parser.add_argument("--finetune-epochs", default=10, type=int)
+        parser.add_argument("--p-start", default=0.4, type=float)
+        parser.add_argument("--p-end", default=1.0, type=float)
+        parser.add_argument("--bipartite-merge", default=16, type=int)
+        parser.add_argument("--step-size", default=10, type=int)
+        parser.add_argument("--merge-size", default=2, type=int)
+        parser.add_argument("--local-drop", action="store_true")
         # parser.add_argument("--top-k", default=2, type=int)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # self.tome_r = np.arange(0, 25, 8)
-        # # self.tome_k = np.arange(28, 99, 14)
-        # self.tome_k = [0]
-        self.tome_p = np.linspace(0.0, 1.0, 20)
-        # # self.tome_p = np.linspace(0.8, 1.0, 10)
-        # # tome
-        # self.tome_p = np.append(self.tome_p, 0)
-        self.tome_r = np.arange(0, 24, 4)
-        # self.tome_p = np.arange(28, 196, 28)
-        # self.tome_k = np.arange(28, 98, 7)
-        self.tome_r = [0]
+        self.tome_p = np.linspace(
+            self.args.p_start, self.args.p_end, self.args.step_size
+        ).tolist()
+        self.tome_r = np.arange(
+            0, self.args.bipartite_merge, self.args.merge_size
+        ).tolist()
+        #### add in initial test ####
+        if self.args.p_start > 0:
+            self.tome_p = [0] + self.tome_p
+
         self.init()
 
     def main(self):
@@ -81,7 +85,7 @@ class HubMeDrop(BasePruning):
         # )
 
     def init(self):
-        apply_patch(self.model)
+        apply_patch(self.model, local_drop=self.args.local_drop)
         for name, param in self.model.named_parameters():
             if not "norm" in name:
                 if "cls_token" in name:
@@ -239,7 +243,9 @@ def plot_and_save(x, y, z, labels, xlabel, ylabel, title, filename):
     plt.close()
 
 
-def apply_patch(model, trace_source: bool = False, prop_attn: bool = True):
+def apply_patch(
+    model, trace_source: bool = False, prop_attn: bool = True, local_drop: bool = False
+):
     """
     Applies ToMe to this transformer. Afterward, set r using model.r.
     If you want to know the source of each token (e.g., for visualization), set trace_source = true.
@@ -275,6 +281,9 @@ def apply_patch(model, trace_source: bool = False, prop_attn: bool = True):
             if isinstance(module.mlp, CustomizedMoEMLP):
                 module.mlp.gate.__class__ = GshardGateDropout
                 module.mlp.gate._tome_info = module._tome_info
+                module.mlp.gate.local = local_drop
+                module.mlp.gate.init()
+
         elif isinstance(module, Attention):
             module.__class__ = HubMeAttention
 
@@ -492,6 +501,52 @@ class HubMeAttention(ToMeAttention):
         return x, k.mean(1)
 
 
+class NaiveGateDropout(CustomizedNaiveGate):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, inp, return_all_scores=False):
+        r"""
+        The naive implementation simply calculates the top-k of a linear layer's
+        output.
+        """
+        gate = self.gate(inp)
+        gate_top_k_val, gate_top_k_idx = torch.topk(
+            gate, k=self.top_k, dim=-1, largest=True, sorted=False
+        )  # [.. x top_k]
+        gate_top_k_val = gate_top_k_val.view(-1, self.top_k)
+
+        # (BxL) x 1 x top_k
+        gate_score = F.softmax(gate_top_k_val, dim=-1)
+
+        p = self._tome_info["p"].pop()
+        gate_top_k_idx = self.token_drop(self, gate_score, gate_top_k_idx, p)
+
+        if return_all_scores:
+            return gate_top_k_idx, gate_score, gate
+        return gate_top_k_idx, gate_score
+
+    def token_drop(self, gate_score, topk_idx, p):
+        if p == 0:
+            return topk_idx
+
+        B, Tk, _ = self.original_shape
+
+        num_dropped = int(p * Tk)
+
+        prob_dist = gate_score
+        uni_dist = th.full_like(gate_score, 1 / gate_score.size(-1))
+        jsd = JSD()
+        score = jsd(prob_dist, uni_dist)
+        score = score.view(B, Tk, -1)
+        # topk_idx = topk_idx.view(B, Tk, -1)
+        sorted_idx = th.argsort(score, dim=1)[:, 0:num_dropped].squeeze()
+        rows = th.arange(B).view(-1, 1).expand_as(sorted_idx).to(score.device)
+        sorted_idx = (Tk * rows + sorted_idx).view(-1)
+        topk_idx[sorted_idx] = -1
+        return topk_idx
+
+
 class GshardGateDropout(CustomizedGshardGate):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -509,6 +564,9 @@ class GshardGateDropout(CustomizedGshardGate):
         if return_all_scores:
             return gate_top_k_idx, gate_score, gate
         return gate_top_k_idx, gate_score
+
+    def init(self):
+        self.jsd = JSD()
 
     def forward(self, x):
 
@@ -541,6 +599,7 @@ class GshardGateDropout(CustomizedGshardGate):
             )
             * capacity
         )
+
         topk_idx = fmoe_native.prune_gate_by_capacity(
             topk_idx, capacity, self.num_expert, self.world_size
         )
@@ -552,22 +611,29 @@ class GshardGateDropout(CustomizedGshardGate):
 
         p = self._tome_info["p"].pop()
         topk_idx = self.token_drop(gate_score, topk_idx, p)
+
         return topk_idx, topk_val
 
     def token_drop(self, gate_score, topk_idx, p):
         if p == 0:
             return topk_idx
 
-        num_dropped = int(p * topk_idx.size(0))
-
         prob_dist = gate_score.softmax(dim=-1)
         uni_dist = th.full_like(gate_score, 1 / gate_score.size(-1))
-        jsd = JSD()
-        score = jsd(prob_dist, uni_dist)
+        score = self.jsd(prob_dist, uni_dist)
 
-        sorted_idx = th.argsort(score, dim=0)[0:num_dropped]
+        if self.local:
+            B, Tk, _ = self.original_shape
+            num_dropped = int(p * Tk)
+            score = score.view(B, Tk, -1)
+            sorted_idx = th.argsort(score, dim=1)[:, 0:num_dropped].squeeze()
+            rows = th.arange(B).view(-1, 1).expand_as(sorted_idx).to(score.device)
+            sorted_idx = (Tk * rows + sorted_idx).view(-1)
+        else:
+            num_dropped = int(p * topk_idx.size(0))
+            sorted_idx = th.argsort(score, dim=0)[0:num_dropped].squeeze()
+
         topk_idx[sorted_idx] = -1
-
         return topk_idx
 
 

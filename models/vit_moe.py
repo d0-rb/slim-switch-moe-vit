@@ -39,6 +39,19 @@ class CustomizedMoEMLP(FMoETransformerMLP):
             **kwargs,
         )
 
+    def forward(self, inp: th.Tensor):
+
+        r"""
+        This module wraps up the FMoE module with reshape, residual and layer
+        normalization.
+        """
+        self.gate.original_shape = inp.shape
+        return super().forward(inp)
+        # original_shape = inp.shape
+        # inp = inp.reshape(-1, self.d_model)
+        # output = super().forward(inp)
+        # return output.reshape(original_shape)
+
 
 class CustomizedNaiveGate(NaiveGate):
     """fmoe's naive gate with experts mapping"""
