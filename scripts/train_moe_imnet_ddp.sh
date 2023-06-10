@@ -7,10 +7,6 @@ read -p 'num-experts: ' num_experts
 read -p 'epochs: ' epochs
 read -p 'model type: ' m_type
 
-num_comma=`echo ${cuda} | tr -cd , | wc -c`
-num_cuda=$((${num_comma} + 1))
-echo $num_cuda
-echo $num_comma
 
 port=$((9000 + RANDOM % 1000))
 model="moe_${m_type}_patch16_224"

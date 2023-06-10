@@ -279,7 +279,10 @@ def apply_patch(
             module.__class__ = HubMeBlock
             module._tome_info = model._tome_info
             if isinstance(module.mlp, CustomizedMoEMLP):
-                module.mlp.gate.__class__ = GshardGateDropout
+                if isinstance(module.mlp.gate, CustomizedGshardGate):
+                    module.mlp.gate.__class__ = GshardGateDropout
+                else:
+                    module.mlp.gate.__class__ = NaiveGateDropout
                 module.mlp.gate._tome_info = module._tome_info
                 module.mlp.gate.local = local_drop
                 module.mlp.gate.init()
@@ -520,31 +523,14 @@ class NaiveGateDropout(CustomizedNaiveGate):
         gate_score = F.softmax(gate_top_k_val, dim=-1)
 
         p = self._tome_info["p"].pop()
-        gate_top_k_idx = self.token_drop(self, gate_score, gate_top_k_idx, p)
+        gate_top_k_idx = token_drop(self, gate, gate_top_k_idx, p)
 
         if return_all_scores:
             return gate_top_k_idx, gate_score, gate
         return gate_top_k_idx, gate_score
 
-    def token_drop(self, gate_score, topk_idx, p):
-        if p == 0:
-            return topk_idx
-
-        B, Tk, _ = self.original_shape
-
-        num_dropped = int(p * Tk)
-
-        prob_dist = gate_score
-        uni_dist = th.full_like(gate_score, 1 / gate_score.size(-1))
-        jsd = JSD()
-        score = jsd(prob_dist, uni_dist)
-        score = score.view(B, Tk, -1)
-        # topk_idx = topk_idx.view(B, Tk, -1)
-        sorted_idx = th.argsort(score, dim=1)[:, 0:num_dropped].squeeze()
-        rows = th.arange(B).view(-1, 1).expand_as(sorted_idx).to(score.device)
-        sorted_idx = (Tk * rows + sorted_idx).view(-1)
-        topk_idx[sorted_idx] = -1
-        return topk_idx
+    def init(self):
+        self.jsd = JSD()
 
 
 class GshardGateDropout(CustomizedGshardGate):
@@ -610,31 +596,32 @@ class GshardGateDropout(CustomizedGshardGate):
             topk_idx[:, 1].masked_fill_(mask, -1)
 
         p = self._tome_info["p"].pop()
-        topk_idx = self.token_drop(gate_score, topk_idx, p)
+        topk_idx = token_drop(self, gate_score, topk_idx, p)
 
         return topk_idx, topk_val
 
-    def token_drop(self, gate_score, topk_idx, p):
-        if p == 0:
-            return topk_idx
 
-        prob_dist = gate_score.softmax(dim=-1)
-        uni_dist = th.full_like(gate_score, 1 / gate_score.size(-1))
-        score = self.jsd(prob_dist, uni_dist)
-
-        if self.local:
-            B, Tk, _ = self.original_shape
-            num_dropped = int(p * Tk)
-            score = score.view(B, Tk, -1)
-            sorted_idx = th.argsort(score, dim=1)[:, 0:num_dropped].squeeze()
-            rows = th.arange(B).view(-1, 1).expand_as(sorted_idx).to(score.device)
-            sorted_idx = (Tk * rows + sorted_idx).view(-1)
-        else:
-            num_dropped = int(p * topk_idx.size(0))
-            sorted_idx = th.argsort(score, dim=0)[0:num_dropped].squeeze()
-
-        topk_idx[sorted_idx] = -1
+def token_drop(self, gate_score, topk_idx, p):
+    if p == 0:
         return topk_idx
+
+    prob_dist = gate_score.softmax(dim=-1)
+    uni_dist = th.full_like(gate_score, 1 / gate_score.size(-1))
+    score = self.jsd(prob_dist, uni_dist)
+
+    if self.local:
+        B, Tk, _ = self.original_shape
+        num_dropped = int(p * Tk)
+        score = score.view(B, Tk, -1)
+        sorted_idx = th.argsort(score, dim=1)[:, 0:num_dropped].squeeze()
+        rows = th.arange(B).view(-1, 1).expand_as(sorted_idx).to(score.device)
+        sorted_idx = (Tk * rows + sorted_idx).view(-1)
+    else:
+        num_dropped = int(p * topk_idx.size(0))
+        sorted_idx = th.argsort(score, dim=0)[0:num_dropped].squeeze()
+
+    topk_idx[sorted_idx] = -1
+    return topk_idx
 
 
 def make_tome_class(transformer_class):

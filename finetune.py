@@ -35,31 +35,19 @@ from datasets import train_val_split
 from engine import evaluate
 from engine import train_one_epoch
 from losses import DistillationLoss
-from pruning_stages import ClassAttnDropping
-from pruning_stages import CosineSimilarityDropping
-from pruning_stages import DropTokens
-from pruning_stages import ExpertDropping
-from pruning_stages import ExpertMerging
 from pruning_stages import HubMeDrop
-from pruning_stages import MeanShiftDropping
-from pruning_stages import NormDropping
-from pruning_stages import RandomDropping
-from pruning_stages import ToMeDrop
-from pruning_stages import VolumeDropping
 from samplers import RASampler
 from scheduler import CurriculumScheduler
 from utils import TensorboardXTracker
 
-# import models_v2
-
-droptypes = {
-    "random": RandomDropping,
-    "volume": VolumeDropping,
-    "norm": NormDropping,
-    "meanshift": MeanShiftDropping,
-    "cosinesim": CosineSimilarityDropping,
-    "classattn": ClassAttnDropping,
-}
+# droptypes = {
+# "random": RandomDropping,
+# "volume": VolumeDropping,
+# "norm": NormDropping,
+# "meanshift": MeanShiftDropping,
+# "cosinesim": CosineSimilarityDropping,
+# "classattn": ClassAttnDropping,
+# }
 
 
 def get_args_parser():
@@ -531,9 +519,9 @@ def get_args_parser():
     parser.add_argument("--drop_experts", action="store_true")
     parser.add_argument("--drop_tokens", action="store_true")
 
-    ExpertMerging.get_parser(parser)
-    ExpertDropping.get_parser(parser)
-    DropTokens.get_parser(parser)
+    # ExpertMerging.get_parser(parser)
+    # ExpertDropping.get_parser(parser)
+    HubMeDrop.get_parser(parser)
 
     return parser
 
@@ -785,38 +773,6 @@ def main(args):
             checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"])
 
-    # example declaration feel free to chang anything
-    expert_merging = ExpertMerging(
-        model=model_without_ddp,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
-        mixup_fn=mixup_fn,
-        device=device,
-    )
-
-    expert_dropping = droptypes[args.expert_drop_type](
-        model=model_without_ddp,
-        trainloader=data_loader_train,
-        valloader=data_loader_val,
-        testloader=data_loader_test,
-        criterion=criterion,
-        args=args,
-        writer=writer,
-        loss_scaler=loss_scaler,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        model_ema=model_ema,
-        mixup_fn=mixup_fn,
-        device=device,
-    )
     tome_merge = HubMeDrop(
         model=model,
         trainloader=data_loader_train,
@@ -831,23 +787,8 @@ def main(args):
         mixup_fn=mixup_fn,
     )
 
-    print(f"Start training for {args.epochs} epochs")
+    tome_merge.main()
 
-    #################################
-    # insert class derived from pruning_stages/base.py here
-    # pruning / fine-tuning should be self-contained under that class
-
-    if args.drop_experts:
-        expert_dropping.prune()
-    if args.merge_experts:
-        expert_merging.prune()
-    if args.drop_tokens:
-        tome_merge.main()
-
-    if args.finetune:
-        pass
-
-    # test_stats = evaluate(data_loader_test, model, device)
     writer.close()
 
 
